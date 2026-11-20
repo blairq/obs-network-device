@@ -1,0 +1,30 @@
+# Build & dependency artifacts
+.deps/
+build_*/
+out/
+dist/
+
+# IDE & editor files
+.vs/
+.vscode/
+*.user
+*.sln
+*.vcxproj*
+*.suo
+*.opensdf
+*.sdf
+*.ipch
+CMakeSettings.json
+CMakeUserPresets.json
+
+# Compiled binaries
+*.dll
+*.exe
+*.pdb
+*.lib
+*.exp
+*.obj
+*.o
+*.a
+*.so
+*.dylib

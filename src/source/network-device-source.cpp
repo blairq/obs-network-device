@@ -13,7 +13,6 @@
 #include <QUrl>
 #include <QWidget>
 
-#include <cstring>
 #include <mutex>
 
 namespace {
@@ -69,6 +68,35 @@ QString redactUriPassword(const QString &uri)
     return u.toString();
 }
 
+void onChildAudioCaptured(void *param,
+                          obs_source_t *childSource,
+                          const struct audio_data *audioData,
+                          bool muted)
+{
+    UNUSED_PARAMETER(childSource);
+    auto *self = static_cast<NetworkDeviceSource *>(param);
+    if (!self || !audioData || audioData->frames == 0 || muted) {
+        return;
+    }
+
+    struct obs_audio_info oai {};
+    if (!obs_get_audio_info(&oai)) {
+        return;
+    }
+
+    struct obs_source_audio out {};
+    for (size_t i = 0; i < MAX_AV_PLANES; ++i) {
+        out.data[i] = audioData->data[i];
+    }
+    out.frames = audioData->frames;
+    out.speakers = oai.speakers;
+    out.format = AUDIO_FORMAT_FLOAT_PLANAR;
+    out.samples_per_sec = oai.samples_per_sec;
+    out.timestamp = audioData->timestamp;
+
+    obs_source_output_audio(self->source, &out);
+}
+
 void detachAndReleaseChild(NetworkDeviceSource *self)
 {
     obs_source_t *childToRelease = nullptr;
@@ -82,6 +110,7 @@ void detachAndReleaseChild(NetworkDeviceSource *self)
     }
 
     if (childToRelease) {
+        obs_source_remove_audio_capture_callback(childToRelease, onChildAudioCaptured, self);
         obs_source_remove_active_child(self->source, childToRelease);
         obs_source_release(childToRelease);
     }
@@ -132,6 +161,9 @@ void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &
         obs_source_t *newChild =
             obs_source_create_private("ffmpeg_source", childName.constData(), childData);
         if (newChild) {
+            obs_source_set_audio_mixers(newChild, 0);
+            obs_source_add_audio_capture_callback(newChild, onChildAudioCaptured, self);
+
             obs_source_t *oldChild = nullptr;
             {
                 std::lock_guard<std::mutex> lock(self->mutex);
@@ -140,6 +172,7 @@ void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &
             }
             obs_source_add_active_child(self->source, newChild);
             if (oldChild) {
+                obs_source_remove_audio_capture_callback(oldChild, onChildAudioCaptured, self);
                 obs_source_remove_active_child(self->source, oldChild);
                 obs_source_release(oldChild);
             }
@@ -370,51 +403,6 @@ void networkDeviceVideoRender(void *data, gs_effect_t *effect)
     obs_source_release(child);
 }
 
-bool networkDeviceAudioRender(void *data,
-                              uint64_t *tsOut,
-                              struct obs_source_audio_mix *audioOutput,
-                              uint32_t mixers,
-                              size_t channels,
-                              size_t sampleRate)
-{
-    UNUSED_PARAMETER(sampleRate);
-    obs_source_t *child = acquireChild(static_cast<NetworkDeviceSource *>(data));
-    if (!child) {
-        return false;
-    }
-
-    if (obs_source_audio_pending(child)) {
-        obs_source_release(child);
-        return false;
-    }
-
-    const uint64_t ts = obs_source_get_audio_timestamp(child);
-    if (!ts) {
-        obs_source_release(child);
-        return false;
-    }
-
-    struct obs_source_audio_mix childAudio {};
-    obs_source_get_audio_mix(child, &childAudio);
-
-    for (size_t mix = 0; mix < MAX_AUDIO_MIXES; ++mix) {
-        if ((mixers & (1U << mix)) == 0) {
-            continue;
-        }
-        for (size_t ch = 0; ch < channels && ch < MAX_AUDIO_CHANNELS; ++ch) {
-            float *dst = audioOutput->output[mix].data[ch];
-            const float *src = childAudio.output[mix].data[ch];
-            if (dst && src) {
-                std::memcpy(dst, src, AUDIO_OUTPUT_FRAMES * sizeof(float));
-            }
-        }
-    }
-
-    *tsOut = ts;
-    obs_source_release(child);
-    return true;
-}
-
 enum gs_color_space networkDeviceGetColorSpace(void *data,
                                                size_t count,
                                                const enum gs_color_space *preferredSpaces)
@@ -492,8 +480,8 @@ void registerNetworkDeviceSource()
     struct obs_source_info info {};
     info.id = "network_device_source";
     info.type = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW |
-                        OBS_SOURCE_COMPOSITE | OBS_SOURCE_SRGB;
+    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_AUDIO |
+                        OBS_SOURCE_SRGB;
     info.get_name = networkDeviceGetName;
     info.create = networkDeviceCreate;
     info.destroy = networkDeviceDestroy;
@@ -503,7 +491,6 @@ void registerNetworkDeviceSource()
     info.get_width = networkDeviceGetWidth;
     info.get_height = networkDeviceGetHeight;
     info.video_render = networkDeviceVideoRender;
-    info.audio_render = networkDeviceAudioRender;
     info.enum_active_sources = networkDeviceEnumSources;
     info.enum_all_sources = networkDeviceEnumSources;
     info.video_get_color_space = networkDeviceGetColorSpace;

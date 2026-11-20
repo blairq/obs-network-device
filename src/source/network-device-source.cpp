@@ -10,6 +10,7 @@
 #include <QApplication>
 #include <QDialog>
 #include <QString>
+#include <QUrl>
 #include <QWidget>
 
 #include <cstring>
@@ -56,66 +57,103 @@ QString safeSourceUuid(obs_source_t *source)
     return QString::asprintf("src_%p", static_cast<const void *>(source));
 }
 
+QString redactUriPassword(const QString &uri)
+{
+    QUrl u(uri);
+    if (!u.isValid()) {
+        return uri;
+    }
+    if (!u.password().isEmpty()) {
+        u.setPassword(QStringLiteral("***"));
+    }
+    return u.toString();
+}
+
+void detachAndReleaseChild(NetworkDeviceSource *self)
+{
+    obs_source_t *childToRelease = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        if (self->mediaSource) {
+            childToRelease = self->mediaSource;
+            self->mediaSource = nullptr;
+        }
+        self->activeEffectiveUri.clear();
+    }
+
+    if (childToRelease) {
+        obs_source_remove_active_child(self->source, childToRelease);
+        obs_source_release(childToRelease);
+    }
+}
+
 void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &cfg)
 {
     const QString effectiveUri = netdev::OnvifAuth::injectRtspCredentials(
         cfg.rtspUri, cfg.username, cfg.password);
 
-    obs_source_t *childToRelease = nullptr;
-    obs_source_t *childToUpdate = nullptr;
+    if (effectiveUri.isEmpty()) {
+        detachAndReleaseChild(self);
+        return;
+    }
 
+    obs_data_t *childData = obs_data_create();
+    obs_data_set_bool(childData, "is_local_file", false);
+    const QByteArray uriUtf8 = effectiveUri.toUtf8();
+    obs_data_set_string(childData, "input", uriUtf8.constData());
+    obs_data_set_bool(childData, "hw_decode", cfg.hwDecode);
+    obs_data_set_int(childData, "buffering_mb", 0);
+    obs_data_set_int(childData, "reconnect_delay_sec", 2);
+    obs_data_set_bool(childData, "restart_on_activate", true);
+    obs_data_set_bool(childData, "clear_on_media_end", false);
+
+    const char *ffOpts = (cfg.rtspTransport == QStringLiteral("udp"))
+                             ? "rtsp_transport=udp"
+                             : "rtsp_transport=tcp";
+    obs_data_set_string(childData, "ffmpeg_options", ffOpts);
+
+    obs_source_t *existingChild = nullptr;
     {
         std::lock_guard<std::mutex> lock(self->mutex);
+        if (self->mediaSource) {
+            existingChild = obs_source_get_ref(self->mediaSource);
+        }
+        self->activeEffectiveUri = effectiveUri;
+        self->activeTransport = cfg.rtspTransport;
+        self->activeHwDecode = cfg.hwDecode;
+    }
 
-        if (effectiveUri.isEmpty()) {
-            if (self->mediaSource) {
-                obs_source_remove_active_child(self->source, self->mediaSource);
-                childToRelease = self->mediaSource;
-                self->mediaSource = nullptr;
+    if (existingChild) {
+        obs_source_update(existingChild, childData);
+        obs_source_release(existingChild);
+    } else {
+        const QByteArray childName =
+            QStringLiteral("%1_ffmpeg").arg(self->sourceUuid).toUtf8();
+        obs_source_t *newChild =
+            obs_source_create_private("ffmpeg_source", childName.constData(), childData);
+        if (newChild) {
+            obs_source_t *oldChild = nullptr;
+            {
+                std::lock_guard<std::mutex> lock(self->mutex);
+                oldChild = self->mediaSource;
+                self->mediaSource = newChild;
             }
-            self->activeEffectiveUri.clear();
-        } else {
-            if (!self->mediaSource) {
-                const QByteArray childName =
-                    QStringLiteral("%1_ffmpeg").arg(self->sourceUuid).toUtf8();
-                self->mediaSource = obs_source_create_private("ffmpeg_source", childName.constData(), nullptr);
-                if (self->mediaSource) {
-                    obs_source_add_active_child(self->source, self->mediaSource);
-                }
+            obs_source_add_active_child(self->source, newChild);
+            if (oldChild) {
+                obs_source_remove_active_child(self->source, oldChild);
+                obs_source_release(oldChild);
             }
-            if (self->mediaSource) {
-                childToUpdate = obs_source_get_ref(self->mediaSource);
-            }
-            self->activeEffectiveUri = effectiveUri;
-            self->activeTransport = cfg.rtspTransport;
-            self->activeHwDecode = cfg.hwDecode;
         }
     }
 
-    if (childToRelease) {
-        obs_source_release(childToRelease);
-    }
+    obs_data_release(childData);
 
-    if (childToUpdate) {
-        obs_data_t *childData = obs_data_create();
-        obs_data_set_bool(childData, "is_local_file", false);
-        const QByteArray uriUtf8 = effectiveUri.toUtf8();
-        obs_data_set_string(childData, "input", uriUtf8.constData());
-        obs_data_set_bool(childData, "hw_decode", cfg.hwDecode);
-        obs_data_set_int(childData, "buffering_mb", 0);
-        obs_data_set_int(childData, "reconnect_delay_sec", 2);
-        obs_data_set_bool(childData, "restart_on_activate", true);
-        obs_data_set_bool(childData, "clear_on_media_end", false);
-
-        const char *ffOpts = (cfg.rtspTransport == QStringLiteral("udp"))
-                                 ? "rtsp_transport=udp"
-                                 : "rtsp_transport=tcp";
-        obs_data_set_string(childData, "ffmpeg_options", ffOpts);
-
-        obs_source_update(childToUpdate, childData);
-        obs_data_release(childData);
-        obs_source_release(childToUpdate);
-    }
+    const QString safeUri = redactUriPassword(effectiveUri);
+    obs_log(LOG_INFO, "Configured RTSP stream (%s): %s [%s, hw_decode=%s]",
+            self->sourceUuid.toUtf8().constData(),
+            safeUri.toUtf8().constData(),
+            ffOpts,
+            cfg.hwDecode ? "true" : "false");
 }
 
 void syncPtzRegistry(NetworkDeviceSource *self)
@@ -189,21 +227,7 @@ void networkDeviceDestroy(void *data)
     }
 
     netdev::DeviceRegistry::instance().unregisterCamera(self->sourceUuid);
-
-    obs_source_t *childToRelease = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(self->mutex);
-        if (self->mediaSource) {
-            obs_source_remove_active_child(self->source, self->mediaSource);
-            childToRelease = self->mediaSource;
-            self->mediaSource = nullptr;
-        }
-    }
-
-    if (childToRelease) {
-        obs_source_release(childToRelease);
-    }
-
+    detachAndReleaseChild(self);
     delete self;
 }
 
@@ -248,22 +272,13 @@ bool onReconnectClicked(obs_properties_t *props, obs_property_t *property, void 
         return false;
     }
 
-    obs_source_t *childToRelease = nullptr;
     netdev::SourceConfig cfg;
     {
         std::lock_guard<std::mutex> lock(self->mutex);
         cfg = self->config;
-        if (self->mediaSource) {
-            obs_source_remove_active_child(self->source, self->mediaSource);
-            childToRelease = self->mediaSource;
-            self->mediaSource = nullptr;
-        }
     }
 
-    if (childToRelease) {
-        obs_source_release(childToRelease);
-    }
-
+    detachAndReleaseChild(self);
     pushSettingsToChild(self, cfg);
     return false;
 }
@@ -477,7 +492,7 @@ void registerNetworkDeviceSource()
     struct obs_source_info info {};
     info.id = "network_device_source";
     info.type = OBS_SOURCE_TYPE_INPUT;
-    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_AUDIO |
+    info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW |
                         OBS_SOURCE_COMPOSITE | OBS_SOURCE_SRGB;
     info.get_name = networkDeviceGetName;
     info.create = networkDeviceCreate;

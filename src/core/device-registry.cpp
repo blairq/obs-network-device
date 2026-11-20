@@ -18,22 +18,35 @@ void DeviceRegistry::registerCamera(const PtzCameraEntry &entry)
         return;
     }
 
+    bool changed = false;
     {
         QMutexLocker lock(&m_mutex);
-        bool updated = false;
+        bool found = false;
         for (PtzCameraEntry &existing : m_cameras) {
             if (existing.sourceUuid == entry.sourceUuid) {
-                existing = entry;
-                updated = true;
+                found = true;
+                if (existing.sourceName != entry.sourceName ||
+                    existing.deviceName != entry.deviceName ||
+                    existing.ptzServiceUrl != entry.ptzServiceUrl ||
+                    existing.profileToken != entry.profileToken ||
+                    existing.username != entry.username ||
+                    existing.password != entry.password ||
+                    existing.clockOffsetSecs != entry.clockOffsetSecs) {
+                    existing = entry;
+                    changed = true;
+                }
                 break;
             }
         }
-        if (!updated) {
+        if (!found) {
             m_cameras.push_back(entry);
+            changed = true;
         }
     }
 
-    emit cameraListChanged();
+    if (changed) {
+        emit cameraListChanged();
+    }
 }
 
 void DeviceRegistry::unregisterCamera(const QString &sourceUuid)

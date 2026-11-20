@@ -73,7 +73,8 @@ struct SourceConfig {
     QString rtspUri;
     QString snapshotUri;
     QString rtspTransport = QStringLiteral("tcp");
-    bool hwDecode = true;
+    bool hwDecode = false;
+    bool lowLatency = true;
     bool hasPtz = false;
     bool autoReconnect = true;
     qint64 clockOffsetSecs = 0;

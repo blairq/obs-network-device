@@ -224,6 +224,8 @@ void DeviceExplorerDialog::setupUi(const SourceConfig &initialConfig)
     if (initialConfig.rtspTransport == QStringLiteral("udp")) {
         m_transportCombo->setCurrentIndex(1);
     }
+    m_lowLatencyCheck = new QCheckBox(QStringLiteral("Baja latencia (RTSP)"), optsGroup);
+    m_lowLatencyCheck->setChecked(initialConfig.lowLatency);
     m_hwDecodeCheck = new QCheckBox(QStringLiteral("Decodificacion por hardware"), optsGroup);
     m_hwDecodeCheck->setChecked(initialConfig.hwDecode);
     m_ptzCheck = new QCheckBox(QStringLiteral("Habilitar control PTZ automatico"), optsGroup);
@@ -231,6 +233,7 @@ void DeviceExplorerDialog::setupUi(const SourceConfig &initialConfig)
 
     optsLayout->addWidget(new QLabel(QStringLiteral("Transporte:"), optsGroup));
     optsLayout->addWidget(m_transportCombo);
+    optsLayout->addWidget(m_lowLatencyCheck);
     optsLayout->addWidget(m_hwDecodeCheck);
     optsLayout->addWidget(m_ptzCheck);
     optsLayout->addStretch();
@@ -644,6 +647,7 @@ SourceConfig DeviceExplorerDialog::selectedConfig() const
     cfg.rtspUri = prof.rtspUri;
     cfg.snapshotUri = prof.snapshotUri;
     cfg.rtspTransport = m_transportCombo->currentData().toString();
+    cfg.lowLatency = m_lowLatencyCheck->isChecked();
     cfg.hwDecode = m_hwDecodeCheck->isChecked();
     cfg.hasPtz = m_ptzCheck->isChecked() && !dev.ptzServiceUrl.isEmpty();
     cfg.clockOffsetSecs = dev.clockOffsetSecs;

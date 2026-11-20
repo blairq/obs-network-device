@@ -13,6 +13,7 @@
 #include <QUrl>
 #include <QWidget>
 
+#include <atomic>
 #include <mutex>
 
 namespace {
@@ -31,6 +32,7 @@ constexpr const char *kPropProfileName = "profile_name";
 constexpr const char *kPropRtspUri = "rtsp_uri";
 constexpr const char *kPropSnapshotUri = "snapshot_uri";
 constexpr const char *kPropRtspTransport = "rtsp_transport";
+constexpr const char *kPropLowLatency = "low_latency";
 constexpr const char *kPropHwDecode = "hw_decode";
 constexpr const char *kPropHasPtz = "has_ptz";
 constexpr const char *kPropClockOffset = "clock_offset_secs";
@@ -39,12 +41,14 @@ struct NetworkDeviceSource {
     obs_source_t *source = nullptr;
     obs_source_t *mediaSource = nullptr;
     std::mutex mutex;
+    std::atomic<bool> destroying{false};
 
     QString sourceUuid;
     netdev::SourceConfig config;
     QString activeEffectiveUri;
     QString activeTransport;
-    bool activeHwDecode = true;
+    bool activeHwDecode = false;
+    bool activeLowLatency = true;
 };
 
 QString safeSourceUuid(obs_source_t *source)
@@ -75,7 +79,8 @@ void onChildAudioCaptured(void *param,
 {
     UNUSED_PARAMETER(childSource);
     auto *self = static_cast<NetworkDeviceSource *>(param);
-    if (!self || !audioData || audioData->frames == 0 || muted) {
+    if (!self || self->destroying.load(std::memory_order_acquire) || !audioData ||
+        audioData->frames == 0 || muted) {
         return;
     }
 
@@ -116,7 +121,9 @@ void detachAndReleaseChild(NetworkDeviceSource *self)
     }
 }
 
-void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &cfg)
+void pushSettingsToChild(NetworkDeviceSource *self,
+                         const netdev::SourceConfig &cfg,
+                         bool forceRestart = false)
 {
     const QString effectiveUri = netdev::OnvifAuth::injectRtspCredentials(
         cfg.rtspUri, cfg.username, cfg.password);
@@ -126,6 +133,35 @@ void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &
         return;
     }
 
+    obs_source_t *existingChild = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(self->mutex);
+        if (!forceRestart && self->mediaSource &&
+            self->activeEffectiveUri == effectiveUri &&
+            self->activeTransport == cfg.rtspTransport &&
+            self->activeHwDecode == cfg.hwDecode &&
+            self->activeLowLatency == cfg.lowLatency) {
+            return;
+        }
+        if (self->mediaSource) {
+            existingChild = obs_source_get_ref(self->mediaSource);
+        }
+        self->activeEffectiveUri = effectiveUri;
+        self->activeTransport = cfg.rtspTransport;
+        self->activeHwDecode = cfg.hwDecode;
+        self->activeLowLatency = cfg.lowLatency;
+    }
+
+    QString ffOpts = (cfg.rtspTransport == QStringLiteral("udp"))
+                         ? QStringLiteral("rtsp_transport=udp timeout=5000000")
+                         : QStringLiteral("rtsp_transport=tcp timeout=5000000");
+    if (cfg.lowLatency) {
+        ffOpts += QStringLiteral(
+            " fflags=nobuffer flags=low_delay max_delay=50000"
+            " reorder_queue_size=0 analyzeduration=500000 probesize=262144");
+    }
+    const QByteArray ffOptsUtf8 = ffOpts.toUtf8();
+
     obs_data_t *childData = obs_data_create();
     obs_data_set_bool(childData, "is_local_file", false);
     const QByteArray uriUtf8 = effectiveUri.toUtf8();
@@ -133,26 +169,14 @@ void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &
     obs_data_set_bool(childData, "hw_decode", cfg.hwDecode);
     obs_data_set_int(childData, "buffering_mb", 0);
     obs_data_set_int(childData, "reconnect_delay_sec", 2);
-    obs_data_set_bool(childData, "restart_on_activate", true);
+    obs_data_set_bool(childData, "restart_on_activate", false);
+    obs_data_set_bool(childData, "close_when_inactive", false);
     obs_data_set_bool(childData, "clear_on_media_end", false);
-
-    const char *ffOpts = (cfg.rtspTransport == QStringLiteral("udp"))
-                             ? "rtsp_transport=udp"
-                             : "rtsp_transport=tcp";
-    obs_data_set_string(childData, "ffmpeg_options", ffOpts);
-
-    obs_source_t *existingChild = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(self->mutex);
-        if (self->mediaSource) {
-            existingChild = obs_source_get_ref(self->mediaSource);
-        }
-        self->activeEffectiveUri = effectiveUri;
-        self->activeTransport = cfg.rtspTransport;
-        self->activeHwDecode = cfg.hwDecode;
-    }
+    obs_data_set_string(childData, "ffmpeg_options", ffOptsUtf8.constData());
 
     if (existingChild) {
+        obs_source_set_async_unbuffered(existingChild, cfg.lowLatency);
+        obs_source_set_async_decoupled(existingChild, cfg.lowLatency);
         obs_source_update(existingChild, childData);
         obs_source_release(existingChild);
     } else {
@@ -162,6 +186,8 @@ void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &
             obs_source_create_private("ffmpeg_source", childName.constData(), childData);
         if (newChild) {
             obs_source_set_audio_mixers(newChild, 0);
+            obs_source_set_async_unbuffered(newChild, cfg.lowLatency);
+            obs_source_set_async_decoupled(newChild, cfg.lowLatency);
             obs_source_add_audio_capture_callback(newChild, onChildAudioCaptured, self);
 
             obs_source_t *oldChild = nullptr;
@@ -182,11 +208,12 @@ void pushSettingsToChild(NetworkDeviceSource *self, const netdev::SourceConfig &
     obs_data_release(childData);
 
     const QString safeUri = redactUriPassword(effectiveUri);
-    obs_log(LOG_INFO, "Configured RTSP stream (%s): %s [%s, hw_decode=%s]",
+    obs_log(LOG_INFO, "Configured RTSP stream (%s): %s [%s, hw_decode=%s, low_latency=%s]",
             self->sourceUuid.toUtf8().constData(),
             safeUri.toUtf8().constData(),
-            ffOpts,
-            cfg.hwDecode ? "true" : "false");
+            ffOptsUtf8.constData(),
+            cfg.hwDecode ? "true" : "false",
+            cfg.lowLatency ? "true" : "false");
 }
 
 void syncPtzRegistry(NetworkDeviceSource *self)
@@ -218,7 +245,8 @@ const char *networkDeviceGetName(void *unused)
 void networkDeviceDefaults(obs_data_t *settings)
 {
     obs_data_set_default_string(settings, kPropRtspTransport, "tcp");
-    obs_data_set_default_bool(settings, kPropHwDecode, true);
+    obs_data_set_default_bool(settings, kPropLowLatency, true);
+    obs_data_set_default_bool(settings, kPropHwDecode, false);
     obs_data_set_default_bool(settings, kPropHasPtz, false);
     obs_data_set_default_int(settings, kPropClockOffset, 0);
 }
@@ -259,6 +287,7 @@ void networkDeviceDestroy(void *data)
         return;
     }
 
+    self->destroying.store(true, std::memory_order_release);
     netdev::DeviceRegistry::instance().unregisterCamera(self->sourceUuid);
     detachAndReleaseChild(self);
     delete self;
@@ -312,7 +341,7 @@ bool onReconnectClicked(obs_properties_t *props, obs_property_t *property, void 
     }
 
     detachAndReleaseChild(self);
-    pushSettingsToChild(self, cfg);
+    pushSettingsToChild(self, cfg, true);
     return false;
 }
 
@@ -349,6 +378,7 @@ obs_properties_t *networkDeviceProperties(void *data)
     obs_property_list_add_string(transport, obs_module_text("NetworkDevice.RtspTransport.Tcp"), "tcp");
     obs_property_list_add_string(transport, obs_module_text("NetworkDevice.RtspTransport.Udp"), "udp");
 
+    obs_properties_add_bool(props, kPropLowLatency, obs_module_text("NetworkDevice.LowLatency"));
     obs_properties_add_bool(props, kPropHwDecode, obs_module_text("NetworkDevice.HwDecode"));
     obs_properties_add_bool(props, kPropHasPtz, obs_module_text("NetworkDevice.HasPtz"));
     obs_properties_add_text(props, kPropPtzServiceUrl,
@@ -445,6 +475,7 @@ void applySourceConfigToData(obs_data_t *settings, const netdev::SourceConfig &c
     obs_data_set_string(settings, kPropRtspUri, cfg.rtspUri.toUtf8().constData());
     obs_data_set_string(settings, kPropSnapshotUri, cfg.snapshotUri.toUtf8().constData());
     obs_data_set_string(settings, kPropRtspTransport, cfg.rtspTransport.toUtf8().constData());
+    obs_data_set_bool(settings, kPropLowLatency, cfg.lowLatency);
     obs_data_set_bool(settings, kPropHwDecode, cfg.hwDecode);
     obs_data_set_bool(settings, kPropHasPtz, cfg.hasPtz);
     obs_data_set_int(settings, kPropClockOffset, cfg.clockOffsetSecs);
@@ -469,6 +500,7 @@ netdev::SourceConfig readSourceConfigFromData(obs_data_t *settings)
     cfg.snapshotUri = QString::fromUtf8(obs_data_get_string(settings, kPropSnapshotUri));
     const QString transport = QString::fromUtf8(obs_data_get_string(settings, kPropRtspTransport));
     cfg.rtspTransport = transport.isEmpty() ? QStringLiteral("tcp") : transport;
+    cfg.lowLatency = obs_data_get_bool(settings, kPropLowLatency);
     cfg.hwDecode = obs_data_get_bool(settings, kPropHwDecode);
     cfg.hasPtz = obs_data_get_bool(settings, kPropHasPtz);
     cfg.clockOffsetSecs = obs_data_get_int(settings, kPropClockOffset);

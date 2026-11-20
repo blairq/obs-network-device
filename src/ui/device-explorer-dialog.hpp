@@ -90,6 +90,7 @@ private:
     // Right panel - Profiles & Options
     QTableWidget *m_profilesTable = nullptr;
     QComboBox *m_transportCombo = nullptr;
+    QCheckBox *m_lowLatencyCheck = nullptr;
     QCheckBox *m_hwDecodeCheck = nullptr;
     QCheckBox *m_ptzCheck = nullptr;
 

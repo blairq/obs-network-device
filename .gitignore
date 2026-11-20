@@ -3,6 +3,7 @@
 build_*/
 out/
 dist/
+cmake/.CMakeBuildNumber
 
 # IDE & editor files
 .vs/

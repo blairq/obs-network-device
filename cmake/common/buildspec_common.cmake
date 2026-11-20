@@ -52,6 +52,69 @@ function(_setup_obs_studio)
     set(_is_fresh --fresh)
   endif()
 
+  if(OS_WINDOWS AND CMAKE_GENERATOR STREQUAL "Ninja")
+    set(_arch_cmake "${dependencies_dir}/${_obs_destination}/cmake/windows/architecture.cmake")
+    if(EXISTS "${_arch_cmake}")
+      file(READ "${_arch_cmake}" _arch_content)
+      string(
+        REPLACE
+        "elseif(OBS_PARENT_ARCHITECTURE STREQUAL x64)"
+        "elseif(OBS_PARENT_ARCHITECTURE STREQUAL x64 AND CMAKE_GENERATOR MATCHES \"Visual Studio\")"
+        _arch_patched
+        "${_arch_content}"
+      )
+      if(NOT _arch_patched STREQUAL _arch_content)
+        file(WRITE "${_arch_cmake}" "${_arch_patched}")
+      endif()
+    endif()
+
+    set(_ninja_build_type "RelWithDebInfo")
+    if(CMAKE_BUILD_TYPE)
+      set(_ninja_build_type "${CMAKE_BUILD_TYPE}")
+    endif()
+
+    message(STATUS "Configure ${label} (Ninja - ${arch})")
+    execute_process(
+      COMMAND
+        "${CMAKE_COMMAND}" -S "${dependencies_dir}/${_obs_destination}" -B
+        "${dependencies_dir}/${_obs_destination}/build_${arch}" -G Ninja
+        "-DCMAKE_BUILD_TYPE=${_ninja_build_type}"
+        "-DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}"
+        "-DCMAKE_CXX_COMPILER=${CMAKE_CXX_COMPILER}"
+        "-DCMAKE_VS_PLATFORM_NAME=${arch}"
+        "-DCMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION=${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}"
+        "-DOBS_PARENT_ARCHITECTURE=${arch}"
+        -DOBS_CMAKE_VERSION:STRING=3.0.0 -DENABLE_PLUGINS:BOOL=OFF -DENABLE_FRONTEND:BOOL=OFF
+        -DENABLE_BROWSER:BOOL=OFF -DENABLE_SCRIPTING:BOOL=OFF
+        -DOBS_VERSION_OVERRIDE:STRING=${_obs_version}
+        "-DCMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}"
+        ${_is_fresh}
+      RESULT_VARIABLE _process_result
+      COMMAND_ERROR_IS_FATAL ANY
+    )
+    message(STATUS "Configure ${label} (Ninja - ${arch}) - done")
+
+    message(STATUS "Build ${label} (Ninja ${_ninja_build_type} - ${arch})")
+    execute_process(
+      COMMAND "${CMAKE_COMMAND}" --build "build_${arch}" --target obs-frontend-api --parallel
+      WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
+      RESULT_VARIABLE _process_result
+      COMMAND_ERROR_IS_FATAL ANY
+    )
+    message(STATUS "Build ${label} (Ninja ${_ninja_build_type} - ${arch}) - done")
+
+    message(STATUS "Install ${label} (Ninja - ${arch})")
+    execute_process(
+      COMMAND
+        "${CMAKE_COMMAND}" --install "build_${arch}" --component Development --prefix "${dependencies_dir}"
+      WORKING_DIRECTORY "${dependencies_dir}/${_obs_destination}"
+      RESULT_VARIABLE _process_result
+      COMMAND_ERROR_IS_FATAL ANY
+    )
+    message(STATUS "Install ${label} (Ninja - ${arch}) - done")
+    return()
+  endif()
+
   if(OS_WINDOWS)
     set(_cmake_generator "${CMAKE_GENERATOR}")
     if(CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION)

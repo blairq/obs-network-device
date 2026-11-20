@@ -72,6 +72,32 @@
       }
     },
     {
+      "name": "windows-ninja-x64",
+      "displayName": "Windows x64 (Ninja + Portable MSVC)",
+      "description": "Build for Windows x64 using Ninja and MSVC cl.exe",
+      "inherits": [
+        "template"
+      ],
+      "binaryDir": "${sourceDir}/build_ninja_x64",
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      },
+      "generator": "Ninja",
+      "warnings": {
+        "dev": true,
+        "deprecated": true
+      },
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_COMPILER": "cl.exe",
+        "CMAKE_CXX_COMPILER": "cl.exe",
+        "CMAKE_VS_PLATFORM_NAME": "x64",
+        "CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION": "10.0.22621.0"
+      }
+    },
+    {
       "name": "ubuntu-x86_64",
       "displayName": "Ubuntu x86_64",
       "description": "Build for Ubuntu x86_64",
@@ -112,6 +138,12 @@
       "name": "windows-ci-x64",
       "configurePreset": "windows-ci-x64",
       "displayName": "Windows x64 CI",
+      "configuration": "RelWithDebInfo"
+    },
+    {
+      "name": "windows-ninja-x64",
+      "configurePreset": "windows-ninja-x64",
+      "displayName": "Windows x64 (Ninja)",
       "configuration": "RelWithDebInfo"
     },
     {

@@ -320,7 +320,7 @@ void OnvifClient::inspectDevice(const QString &serviceUrl, const QString &userna
             sendSoapRequest(
                 mediaEndpoint, snapAction, snapBody, state->username, state->password,
                 state->dev.clockOffsetSecs,
-                [gen, state, idx, finishIfDone](int, const QByteArray &body, const QString &) {
+                [this, gen, state, idx, finishIfDone](int, const QByteArray &body, const QString &) {
                     if (gen != m_inspectionGen || state->failed) {
                         return;
                     }
@@ -814,21 +814,25 @@ bool OnvifClient::parseSystemDateAndTime(const QByteArray &xml,
                 inLocal = true;
                 hasLocal = true;
             } else if (inUtc || inLocal) {
-                const int val = reader.readElementText(QXmlStreamReader::SkipChildElements).toInt();
-                if (inUtc) {
-                    if (name == QLatin1String("Year")) utcYear = val;
-                    else if (name == QLatin1String("Month")) utcMonth = val;
-                    else if (name == QLatin1String("Day")) utcDay = val;
-                    else if (name == QLatin1String("Hour")) utcHour = val;
-                    else if (name == QLatin1String("Minute")) utcMin = val;
-                    else if (name == QLatin1String("Second")) utcSec = val;
-                } else {
-                    if (name == QLatin1String("Year")) locYear = val;
-                    else if (name == QLatin1String("Month")) locMonth = val;
-                    else if (name == QLatin1String("Day")) locDay = val;
-                    else if (name == QLatin1String("Hour")) locHour = val;
-                    else if (name == QLatin1String("Minute")) locMin = val;
-                    else if (name == QLatin1String("Second")) locSec = val;
+                if (name == QLatin1String("Year") || name == QLatin1String("Month") ||
+                    name == QLatin1String("Day") || name == QLatin1String("Hour") ||
+                    name == QLatin1String("Minute") || name == QLatin1String("Second")) {
+                    const int val = reader.readElementText(QXmlStreamReader::SkipChildElements).toInt();
+                    if (inUtc) {
+                        if (name == QLatin1String("Year")) utcYear = val;
+                        else if (name == QLatin1String("Month")) utcMonth = val;
+                        else if (name == QLatin1String("Day")) utcDay = val;
+                        else if (name == QLatin1String("Hour")) utcHour = val;
+                        else if (name == QLatin1String("Minute")) utcMin = val;
+                        else if (name == QLatin1String("Second")) utcSec = val;
+                    } else {
+                        if (name == QLatin1String("Year")) locYear = val;
+                        else if (name == QLatin1String("Month")) locMonth = val;
+                        else if (name == QLatin1String("Day")) locDay = val;
+                        else if (name == QLatin1String("Hour")) locHour = val;
+                        else if (name == QLatin1String("Minute")) locMin = val;
+                        else if (name == QLatin1String("Second")) locSec = val;
+                    }
                 }
             }
         } else if (tok == QXmlStreamReader::EndElement) {

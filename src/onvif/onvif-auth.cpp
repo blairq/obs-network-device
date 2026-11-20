@@ -105,9 +105,9 @@ QString OnvifAuth::injectRtspCredentials(const QString &rtspUri,
         return url.toString(QUrl::FullyEncoded);
     }
 
-    url.setUserName(username);
+    url.setUserName(QString::fromLatin1(QUrl::toPercentEncoding(username)), QUrl::StrictMode);
     if (!password.isEmpty()) {
-        url.setPassword(password);
+        url.setPassword(QString::fromLatin1(QUrl::toPercentEncoding(password)), QUrl::StrictMode);
     }
     return url.toString(QUrl::FullyEncoded);
 }

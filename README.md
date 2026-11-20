@@ -34,30 +34,32 @@ Actualmente implementa **ONVIF (Profile S / Profile T / Media v1 & Media2 v2 / P
 
 ## Instalación rápida de dependencias y compilación
 
-### 1. Instalar herramientas de compilación (una sola vez)
+### 1. Preparar compilador C++ (elegí una opción, una sola vez)
 
-Abrí **PowerShell como Administrador** y ejecutá:
+#### Opción A — Modo portable sin permisos de Administrador (~450 MB)
+Instalás `CMake` y `Ninja` en tu usuario y descargás solo los binarios mínimos x64 de MSVC y Windows 11 SDK en `%LOCALAPPDATA%\obs-portable-msvc` (sin tocar el registro ni pedir UAC):
 
+```powershell
+winget install Kitware.CMake Ninja-build.Ninja
+.\scripts\setup-portable-msvc.ps1
+```
+
+#### Opción B — Con Visual Studio 2022 Build Tools (requiere PowerShell como Administrador)
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\setup-env.ps1
 ```
 
-Esto verifica e instala automáticamente con `winget`:
-- `Kitware.CMake`
-- `Ninja-build.Ninja`
-- `Microsoft.VisualStudio.2022.BuildTools` (C++ + Windows SDK)
-
 ### 2. Descargar dependencias de OBS/Qt6, compilar e instalar
 
-Desde una terminal PowerShell normal en la carpeta del repo:
+Desde una terminal PowerShell normal en la carpeta del repo (`build.ps1` detecta automáticamente si tenés MSVC portable o Visual Studio 2022):
 
 ```powershell
 .\scripts\build.ps1 -Install
 ```
 
 Qué hace `build.ps1`:
-1. Configura CMake con el preset `windows-x64` (descarga automáticamente `obs-deps`, `Qt6` y los fuentes de `obs-studio 32.0.4` en `.deps/` y compila `libobs` + `obs-frontend-api`).
+1. Configura CMake (`windows-ninja-x64` o `windows-x64`), descarga automáticamente `obs-deps`, `Qt6` y los fuentes de `obs-studio 32.0.4` en `.deps/` y compila `libobs` + `obs-frontend-api`.
 2. Compila `obs-network-device.dll` y la suite de tests `obs-network-device-tests.exe`.
 3. Ejecuta los tests unitarios con `ctest`.
 4. Con `-Install`, copia el plugin en `C:\ProgramData\obs-studio\plugins\obs-network-device\`.

@@ -246,6 +246,11 @@ void OnvifClient::inspectDevice(const QString &serviceUrl, const QString &userna
         if (state->pendingProfileRequests > 0) {
             return;
         }
+        for (MediaProfile &p : state->dev.profiles) {
+            if (p.media2RtspUri == p.rtspUri) {
+                p.media2RtspUri.clear();
+            }
+        }
         state->dev.inspected = true;
         if (state->dev.name.isEmpty()) {
             const QString combined = QStringLiteral("%1 %2")
@@ -267,7 +272,17 @@ void OnvifClient::inspectDevice(const QString &serviceUrl, const QString &userna
             return;
         }
 
-        state->pendingProfileRequests = state->dev.profiles.size() * 2;
+        qsizetype totalReqs = 0;
+        for (const MediaProfile &prof : state->dev.profiles) {
+            totalReqs += 2;
+            if (!prof.isMedia2 && !state->dev.mediaServiceUrl.isEmpty()) {
+                totalReqs += 1;
+            }
+            if (!prof.isMedia2 && !state->dev.media2ServiceUrl.isEmpty()) {
+                totalReqs += 1;
+            }
+        }
+        state->pendingProfileRequests = totalReqs;
 
         for (qsizetype idx = 0; idx < state->dev.profiles.size(); ++idx) {
             const MediaProfile &prof = state->dev.profiles.at(idx);
@@ -275,7 +290,7 @@ void OnvifClient::inspectDevice(const QString &serviceUrl, const QString &userna
                                               ? state->dev.media2ServiceUrl
                                               : state->dev.mediaServiceUrl;
 
-            // 1) GetStreamUri
+            // 1) GetStreamUri (RTSP)
             const QString streamBody = prof.isMedia2
                                            ? QStringLiteral(
                                                  "<tr2:GetStreamUri>"
@@ -346,6 +361,71 @@ void OnvifClient::inspectDevice(const QString &serviceUrl, const QString &userna
                     state->pendingProfileRequests--;
                     finishIfDone();
                 });
+
+            // 3) Optional Media1 HTTP stream URI (returns http(s):// on cameras supporting HTTP MJPEG)
+            if (!prof.isMedia2 && !state->dev.mediaServiceUrl.isEmpty()) {
+                const QString httpStreamBody =
+                    QStringLiteral(
+                        "<trt:GetStreamUri>"
+                        "<trt:StreamSetup>"
+                        "<tt:Stream>RTP-Unicast</tt:Stream>"
+                        "<tt:Transport><tt:Protocol>HTTP</tt:Protocol></tt:Transport>"
+                        "</trt:StreamSetup>"
+                        "<trt:ProfileToken>%1</trt:ProfileToken>"
+                        "</trt:GetStreamUri>")
+                        .arg(OnvifAuth::escapeXml(prof.token));
+
+                sendSoapRequest(
+                    state->dev.mediaServiceUrl,
+                    QStringLiteral("http://www.onvif.org/ver10/media/wsdl/GetStreamUri"),
+                    httpStreamBody, state->username, state->password, state->dev.clockOffsetSecs,
+                    [this, gen, state, idx, finishIfDone](int status, const QByteArray &body, const QString &) {
+                        if (gen != m_inspectionGen || state->failed) {
+                            return;
+                        }
+                        if (status >= 200 && status < 300) {
+                            const QString uri = rewriteHostIfInvalid(parseStreamUri(body),
+                                                                     state->dev.deviceServiceUrl);
+                            if ((uri.startsWith(QLatin1String("http://"), Qt::CaseInsensitive) ||
+                                 uri.startsWith(QLatin1String("https://"), Qt::CaseInsensitive)) &&
+                                idx < state->dev.profiles.size()) {
+                                state->dev.profiles[idx].httpUri = uri;
+                            }
+                        }
+                        state->pendingProfileRequests--;
+                        finishIfDone();
+                    });
+            }
+
+            // 4) Optional Media2 RTSP URI (for cameras exposing e.g. Opus audio on Media2)
+            if (!prof.isMedia2 && !state->dev.media2ServiceUrl.isEmpty()) {
+                const QString m2StreamBody =
+                    QStringLiteral(
+                        "<tr2:GetStreamUri>"
+                        "<tr2:Protocol>RTSP</tr2:Protocol>"
+                        "<tr2:ProfileToken>%1</tr2:ProfileToken>"
+                        "</tr2:GetStreamUri>")
+                        .arg(OnvifAuth::escapeXml(prof.token));
+
+                sendSoapRequest(
+                    state->dev.media2ServiceUrl,
+                    QStringLiteral("http://www.onvif.org/ver20/media/wsdl/GetStreamUri"),
+                    m2StreamBody, state->username, state->password, state->dev.clockOffsetSecs,
+                    [this, gen, state, idx, finishIfDone](int status, const QByteArray &body, const QString &) {
+                        if (gen != m_inspectionGen || state->failed) {
+                            return;
+                        }
+                        if (status >= 200 && status < 300) {
+                            const QString uri = rewriteHostIfInvalid(parseStreamUri(body),
+                                                                     state->dev.deviceServiceUrl);
+                            if (!uri.isEmpty() && idx < state->dev.profiles.size()) {
+                                state->dev.profiles[idx].media2RtspUri = uri;
+                            }
+                        }
+                        state->pendingProfileRequests--;
+                        finishIfDone();
+                    });
+            }
         }
     };
 
@@ -1159,6 +1239,7 @@ QVector<MediaProfile> parseProfilesImpl(const QByteArray &xml, bool isMedia2)
     int profileDepth = 0;
     int depth = 0;
     bool inVideoEnc = false;
+    bool inAudioEnc = false;
     bool inPtz = false;
     MediaProfile cur;
 
@@ -1179,7 +1260,10 @@ QVector<MediaProfile> parseProfilesImpl(const QByteArray &xml, bool isMedia2)
                     --depth;
                 } else if (name == videoTag) {
                     inVideoEnc = true;
-                } else if (name == audioEncTag || name == audioSrcTag) {
+                } else if (name == audioEncTag) {
+                    cur.hasAudio = true;
+                    inAudioEnc = true;
+                } else if (name == audioSrcTag) {
                     cur.hasAudio = true;
                 } else if (name == ptzTag) {
                     inPtz = true;
@@ -1198,6 +1282,11 @@ QVector<MediaProfile> parseProfilesImpl(const QByteArray &xml, bool isMedia2)
                         cur.fps = reader.readElementText(QXmlStreamReader::SkipChildElements).toDouble();
                         --depth;
                     }
+                } else if (inAudioEnc) {
+                    if (name == QLatin1String("Encoding")) {
+                        cur.audioEncoding = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
+                        --depth;
+                    }
                 } else if (inPtz && name == QLatin1String("NodeToken")) {
                     cur.ptzToken = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
                     --depth;
@@ -1207,6 +1296,8 @@ QVector<MediaProfile> parseProfilesImpl(const QByteArray &xml, bool isMedia2)
             const auto name = reader.name();
             if (name == videoTag) {
                 inVideoEnc = false;
+            } else if (name == audioEncTag) {
+                inAudioEnc = false;
             } else if (name == ptzTag) {
                 inPtz = false;
             } else if (name == QLatin1String("Profiles") && inProfile && depth == profileDepth) {
@@ -1217,6 +1308,9 @@ QVector<MediaProfile> parseProfilesImpl(const QByteArray &xml, bool isMedia2)
                     profiles.push_back(cur);
                 }
                 inProfile = false;
+                inVideoEnc = false;
+                inAudioEnc = false;
+                inPtz = false;
             }
             --depth;
         }

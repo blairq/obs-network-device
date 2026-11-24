@@ -10,6 +10,7 @@
 #include <QComboBox>
 #include <QDateTime>
 #include <QDialog>
+#include <QDoubleSpinBox>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -226,10 +227,24 @@ QWidget *PtzDockWidget::createPanoramaTab(QWidget *parent)
     auto *zoomRow = new QHBoxLayout();
     zoomRow->addWidget(makeMoveButton(QStringLiteral("Zoom -"), -1.0));
     zoomRow->addWidget(makeMoveButton(QStringLiteral("Zoom +"), 1.0));
+    zoomRow->addWidget(new QLabel(QStringLiteral("Zoom opt:"), tab));
+    m_maxOpticalZoomSpin = new QDoubleSpinBox(tab);
+    m_maxOpticalZoomSpin->setRange(2.0, 40.0);
+    m_maxOpticalZoomSpin->setDecimals(0);
+    m_maxOpticalZoomSpin->setSingleStep(1.0);
+    m_maxOpticalZoomSpin->setSuffix(QStringLiteral("x"));
+    m_maxOpticalZoomSpin->setValue(12.0);
+    m_maxOpticalZoomSpin->setToolTip(
+        QStringLiteral("Zoom optico maximo de la camara para calibrar el encuadre por cuadro (ej. 12x en Polycom MPTZ-9)."));
+    zoomRow->addWidget(m_maxOpticalZoomSpin);
     layout->addLayout(zoomRow);
 
+    connect(m_maxOpticalZoomSpin, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &PtzDockWidget::onMaxOpticalZoomChanged);
     connect(m_panoramaView, &PanoramaViewWidget::pointClicked,
             this, &PtzDockWidget::onPanoramaPointClicked);
+    connect(m_panoramaView, &PanoramaViewWidget::areaSelected,
+            this, &PtzDockWidget::onPanoramaAreaSelected);
     connect(m_panoramaView, &PanoramaViewWidget::presetPinClicked,
             this, &PtzDockWidget::onPanoramaPresetPinClicked);
     connect(m_panoramaView, &PanoramaViewWidget::savePresetRequested,
@@ -528,6 +543,13 @@ void PtzDockWidget::loadCurrentCameraProfile()
         m_invertPanCheck->blockSignals(false);
         m_invertTiltCheck->blockSignals(false);
     }
+    if (m_maxOpticalZoomSpin) {
+        m_maxOpticalZoomSpin->blockSignals(true);
+        m_maxOpticalZoomSpin->setValue(std::clamp(m_activeProfile.maxOpticalZoom, 2.0, 40.0));
+        m_maxOpticalZoomSpin->blockSignals(false);
+    }
+    m_hasTarget = false;
+    m_hasTargetBox = false;
 
     refreshVisualPresetsList();
     syncPanoramaViews();
@@ -574,6 +596,7 @@ void PtzDockWidget::syncPanoramaViews()
         if (!view) {
             return;
         }
+        view->setMaxOpticalZoom(m_activeProfile.maxOpticalZoom);
         if (!m_activePanoramaImage.isNull() && m_activeProfile.panorama.isValid()) {
             view->setPanorama(m_activePanoramaImage, m_activeProfile.panorama);
         } else {
@@ -582,6 +605,7 @@ void PtzDockWidget::syncPanoramaViews()
         view->setSavedPresets(m_activeProfile.savedPresets);
         view->setCurrentPosition(m_currentPos, m_hasCurrentPos);
         view->setTargetPosition(m_targetPan, m_targetTilt, m_hasTarget);
+        view->setTargetBox(m_targetBoxImage, m_hasTargetBox);
     };
 
     applyToView(m_panoramaView);
@@ -774,6 +798,7 @@ void PtzDockWidget::onScanFinished(bool ok,
 
     m_activePanoramaImage = panorama;
     m_hasTarget = false;
+    m_hasTargetBox = false;
     if (!m_store.savePanorama(m_activeProfile, panorama, meta)) {
         m_statusLabel->setText(QStringLiteral("Panoramica creada, pero fallo el guardado en disco."));
     } else {
@@ -803,6 +828,7 @@ void PtzDockWidget::onPanoramaPointClicked(double pan, double tilt)
     m_targetPan = pan;
     m_targetTilt = tilt;
     m_hasTarget = true;
+    m_hasTargetBox = false;
     syncPanoramaViews();
 
     const bool useZoom = m_hasCurrentPos && m_currentPos.hasZoom;
@@ -849,6 +875,69 @@ void PtzDockWidget::onPanoramaPresetPinClicked(const QString &presetId)
             return;
         }
     }
+}
+
+void PtzDockWidget::onPanoramaAreaSelected(double pan,
+                                           double tilt,
+                                           double zoom,
+                                           const QRectF &imageRect)
+{
+    PtzCameraEntry cam;
+    if (!currentCamera(cam) || m_scanner.isRunning()) {
+        return;
+    }
+
+    m_targetPan = pan;
+    m_targetTilt = tilt;
+    m_hasTarget = true;
+    m_targetBoxImage = imageRect;
+    m_hasTargetBox = true;
+    syncPanoramaViews();
+
+    m_statusLabel->setText(
+        QStringLiteral("Encuadrando cuadro: P=%1, T=%2, Z=%3...")
+            .arg(pan, 0, 'f', 2)
+            .arg(tilt, 0, 'f', 2)
+            .arg(zoom, 0, 'f', 2));
+
+    QPointer<PtzDockWidget> self(this);
+    m_client.absoluteMove(
+        cam.ptzServiceUrl, cam.profileToken, cam.username, cam.password, cam.clockOffsetSecs,
+        pan, tilt, zoom, true, 0.85,
+        [self, cam, pan, tilt](bool ok, const QString &err) {
+            if (!self) {
+                return;
+            }
+            if (!ok) {
+                self->m_client.absoluteMove(
+                    cam.ptzServiceUrl, cam.profileToken, cam.username, cam.password,
+                    cam.clockOffsetSecs, pan, tilt, 0.0, false, 0.85,
+                    [self, err](bool ok2, const QString &err2) {
+                        if (!self) {
+                            return;
+                        }
+                        self->m_statusLabel->setText(
+                            ok2 ? QStringLiteral("Camara movida al centro del cuadro (sin zoom absoluto).")
+                                : QStringLiteral("AbsoluteMove fallo: %1")
+                                      .arg(err2.isEmpty() ? err : err2));
+                        if (ok2) {
+                            self->scheduleStatusRefresh();
+                        }
+                    });
+                return;
+            }
+            self->m_statusLabel->setText(QStringLiteral("Camara encuadrada al cuadro (P/T/Z)."));
+            self->scheduleStatusRefresh();
+        });
+}
+
+void PtzDockWidget::onMaxOpticalZoomChanged(double value)
+{
+    m_activeProfile.maxOpticalZoom = std::clamp(value, 2.0, 40.0);
+    if (!m_activeProfile.cameraKey.isEmpty()) {
+        m_store.saveProfile(m_activeProfile);
+    }
+    syncPanoramaViews();
 }
 
 void PtzDockWidget::onPanoramaZoomRequested(int deltaSteps)
@@ -898,6 +987,8 @@ void PtzDockWidget::onOpenBigPanoramaClicked()
 
     connect(bigView, &PanoramaViewWidget::pointClicked,
             this, &PtzDockWidget::onPanoramaPointClicked);
+    connect(bigView, &PanoramaViewWidget::areaSelected,
+            this, &PtzDockWidget::onPanoramaAreaSelected);
     connect(bigView, &PanoramaViewWidget::presetPinClicked,
             this, &PtzDockWidget::onPanoramaPresetPinClicked);
     connect(bigView, &PanoramaViewWidget::savePresetRequested,

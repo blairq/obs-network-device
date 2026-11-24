@@ -25,6 +25,8 @@ add_library(obs-network-device-core STATIC
   src/core/device-provider.hpp
   src/core/device-registry.hpp
   src/core/device-registry.cpp
+  src/core/stream-options.hpp
+  src/core/stream-options.cpp
   src/core/panorama-builder.hpp
   src/core/panorama-builder.cpp
   src/core/panorama-store.hpp
@@ -63,6 +65,8 @@ endif()
 # OBS Studio Plugin Module
 add_library(${CMAKE_PROJECT_NAME} MODULE
   src/plugin-main.cpp
+  src/core/http-snapshot-streamer.hpp
+  src/core/http-snapshot-streamer.cpp
   src/core/obs-frame-capture.hpp
   src/core/obs-frame-capture.cpp
   src/core/panorama-scanner.hpp

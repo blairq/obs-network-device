@@ -3,6 +3,7 @@
 #include "core/device-types.hpp"
 
 #include <QImage>
+#include <QRectF>
 #include <QString>
 #include <QVector>
 
@@ -42,6 +43,17 @@ public:
                                double tilt,
                                double &pxOut,
                                double &pyOut);
+
+    static double zoomToMagnification(double zoom,
+                                      double scanZoom = 0.0,
+                                      double maxOpticalZoom = 12.0);
+
+    static bool rectToPanTiltZoom(const PanoramaMeta &meta,
+                                  const QRectF &imageRectPx,
+                                  double &panOut,
+                                  double &tiltOut,
+                                  double &zoomOut,
+                                  double maxOpticalZoom = 12.0);
 };
 
 } // namespace netdev

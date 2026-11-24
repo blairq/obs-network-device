@@ -219,11 +219,15 @@ void DeviceExplorerDialog::setupUi(const SourceConfig &initialConfig)
     auto *optsGroup = new QGroupBox(QStringLiteral("Opciones de transmision"), rightWidget);
     auto *optsLayout = new QHBoxLayout(optsGroup);
     m_transportCombo = new QComboBox(optsGroup);
-    m_transportCombo->addItem(QStringLiteral("RTSP sobre TCP (Recomendado)"), QStringLiteral("tcp"));
-    m_transportCombo->addItem(QStringLiteral("RTSP sobre UDP"), QStringLiteral("udp"));
-    if (initialConfig.rtspTransport == QStringLiteral("udp")) {
-        m_transportCombo->setCurrentIndex(1);
-    }
+    m_transportCombo->addItem(QStringLiteral("RTSP sobre UDP (Menor delay)"), QStringLiteral("udp"));
+    m_transportCombo->addItem(QStringLiteral("RTSP sobre TCP (Estable)"), QStringLiteral("tcp"));
+    m_transportCombo->addItem(QStringLiteral("RTSP UDP Multicast"), QStringLiteral("udp_multicast"));
+    m_transportCombo->addItem(QStringLiteral("RTSP sobre HTTP"), QStringLiteral("http"));
+    m_transportCombo->addItem(QStringLiteral("RTSP Automático"), QStringLiteral("auto"));
+    m_transportCombo->addItem(QStringLiteral("HTTP MJPEG directo"), QStringLiteral("http_mjpeg"));
+    m_transportCombo->addItem(QStringLiteral("Snapshot HTTP continuo (JPEG)"), QStringLiteral("http_snapshot"));
+    const int transportIdx = m_transportCombo->findData(initialConfig.rtspTransport);
+    m_transportCombo->setCurrentIndex(transportIdx >= 0 ? transportIdx : 1);
     m_lowLatencyCheck = new QCheckBox(QStringLiteral("Baja latencia (RTSP)"), optsGroup);
     m_lowLatencyCheck->setChecked(initialConfig.lowLatency);
     m_hwDecodeCheck = new QCheckBox(QStringLiteral("Decodificacion por hardware"), optsGroup);
@@ -642,6 +646,7 @@ SourceConfig DeviceExplorerDialog::selectedConfig() const
     cfg.serialNumber = dev.serialNumber;
     cfg.deviceServiceUrl = dev.deviceServiceUrl;
     cfg.mediaServiceUrl = dev.mediaServiceUrl;
+    cfg.media2ServiceUrl = dev.media2ServiceUrl;
     cfg.ptzServiceUrl = dev.ptzServiceUrl;
     cfg.username = m_userEdit->text().trimmed();
     cfg.password = m_passEdit->text();
@@ -651,9 +656,11 @@ SourceConfig DeviceExplorerDialog::selectedConfig() const
     cfg.snapshotUri = prof.snapshotUri;
     cfg.rtspTransport = m_transportCombo->currentData().toString();
     cfg.lowLatency = m_lowLatencyCheck->isChecked();
+    cfg.latencyMode = cfg.lowLatency ? QStringLiteral("ultra") : QStringLiteral("standard");
     cfg.hwDecode = m_hwDecodeCheck->isChecked();
     cfg.hasPtz = m_ptzCheck->isChecked() && !dev.ptzServiceUrl.isEmpty();
     cfg.clockOffsetSecs = dev.clockOffsetSecs;
+    cfg.detectedProfiles = dev.profiles;
     return cfg;
 }
 

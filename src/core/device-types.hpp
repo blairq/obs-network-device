@@ -25,6 +25,7 @@ struct MediaProfile {
     QString token;
     QString name;
     QString videoEncoding;
+    QString audioEncoding;
     int width = 0;
     int height = 0;
     double fps = 0.0;
@@ -33,6 +34,8 @@ struct MediaProfile {
     bool isMedia2 = false;
     QString ptzToken;
     QString rtspUri;
+    QString media2RtspUri;
+    QString httpUri;
     QString snapshotUri;
 };
 
@@ -124,6 +127,7 @@ struct CameraPtzProfile {
     QString ptzServiceUrl;
     bool invertPan = false;
     bool invertTilt = false;
+    double maxOpticalZoom = 12.0;
     PanoramaMeta panorama;
     QVector<SavedPtzPreset> savedPresets;
 };
@@ -168,6 +172,7 @@ struct SourceConfig {
     DeviceProtocol protocol = DeviceProtocol::Onvif;
     QString deviceServiceUrl;
     QString mediaServiceUrl;
+    QString media2ServiceUrl;
     QString ptzServiceUrl;
     QString deviceName;
     QString manufacturer;
@@ -180,11 +185,18 @@ struct SourceConfig {
     QString rtspUri;
     QString snapshotUri;
     QString rtspTransport = QStringLiteral("tcp");
+    QString inputFormat;
+    QString latencyMode = QStringLiteral("ultra");
+    int bufferingMb = 0;
     bool hwDecode = false;
     bool lowLatency = true;
+    bool enableAudio = true;
+    int snapshotFps = 15;
+    QString extraFfmpegOptions;
     bool hasPtz = false;
     bool autoReconnect = true;
     qint64 clockOffsetSecs = 0;
+    QVector<MediaProfile> detectedProfiles;
 };
 
 struct PtzCameraEntry {

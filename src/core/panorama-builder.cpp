@@ -820,4 +820,51 @@ bool PanoramaMapper::panTiltToPixel(const PanoramaMeta &meta,
     return true;
 }
 
+double PanoramaMapper::zoomToMagnification(double zoom, double scanZoom, double maxOpticalZoom)
+{
+    const double maxOpt = std::clamp(maxOpticalZoom, 2.0, 60.0);
+    const double z = std::clamp(zoom, 0.0, 1.0);
+    const double sz = std::clamp(scanZoom, 0.0, 1.0);
+    return std::pow(maxOpt, z - sz);
+}
+
+bool PanoramaMapper::rectToPanTiltZoom(const PanoramaMeta &meta,
+                                       const QRectF &imageRectPx,
+                                       double &panOut,
+                                       double &tiltOut,
+                                       double &zoomOut,
+                                       double maxOpticalZoom)
+{
+    if (!meta.isValid() || imageRectPx.width() <= 0.0 || imageRectPx.height() <= 0.0) {
+        return false;
+    }
+
+    const QPointF center = imageRectPx.center();
+    if (!pixelToPanTilt(meta, center.x(), center.y(), panOut, tiltOut)) {
+        return false;
+    }
+
+    double sumW = 0.0;
+    double sumH = 0.0;
+    int tileCount = 0;
+    for (const PanoramaTileMeta &t : meta.tiles) {
+        if (t.tileW > 0.0 && t.tileH > 0.0) {
+            sumW += t.tileW;
+            sumH += t.tileH;
+            ++tileCount;
+        }
+    }
+    const double baseW = (tileCount > 0) ? (sumW / static_cast<double>(tileCount)) : 160.0;
+    const double baseH = (tileCount > 0) ? (sumH / static_cast<double>(tileCount)) : 90.0;
+
+    const double magW = baseW / std::max(1.0, imageRectPx.width());
+    const double magH = baseH / std::max(1.0, imageRectPx.height());
+    const double relMag = std::min(magW, magH);
+
+    const double maxOpt = std::clamp(maxOpticalZoom, 2.0, 60.0);
+    const double deltaZ = std::log(std::max(0.05, relMag)) / std::log(maxOpt);
+    zoomOut = std::clamp(meta.scanZoom + deltaZ, 0.0, 1.0);
+    return true;
+}
+
 } // namespace netdev

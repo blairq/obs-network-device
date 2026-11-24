@@ -1,5 +1,6 @@
 #include "core/panorama-builder.hpp"
 #include "core/panorama-store.hpp"
+#include "core/stream-options.hpp"
 #include "onvif/onvif-auth.hpp"
 #include "onvif/onvif-client.hpp"
 #include "onvif/ws-discovery.hpp"
@@ -526,6 +527,176 @@ void testPanoramaBuilderMapperAndStore()
     CHECK(!store.loadPresetThumbnail(loaded.cameraKey, loaded.savedPresets.at(0).thumbnailFile).isNull());
 }
 
+void testStreamOptionsAndProfilesSerialization()
+{
+    MediaProfile h264;
+    h264.token = QStringLiteral("Profile_cam_main");
+    h264.name = QStringLiteral("cam/main");
+    h264.videoEncoding = QStringLiteral("H264");
+    h264.audioEncoding = QStringLiteral("G711");
+    h264.width = 1920;
+    h264.height = 1080;
+    h264.fps = 30.0;
+    h264.hasAudio = true;
+    h264.hasPtz = true;
+    h264.rtspUri = QStringLiteral("rtsp://192.168.1.96/cam/main?audio=pcmu");
+    h264.media2RtspUri = QStringLiteral("rtsp://192.168.1.96/cam/main?audio=opus");
+    h264.snapshotUri = QStringLiteral("http://192.168.1.96/onvif/snapshot.jpg?profile=Profile_cam_main");
+
+    MediaProfile mjpeg;
+    mjpeg.token = QStringLiteral("Profile_cam_mjpeg");
+    mjpeg.name = QStringLiteral("cam/mjpeg");
+    mjpeg.videoEncoding = QStringLiteral("JPEG");
+    mjpeg.width = 1280;
+    mjpeg.height = 720;
+    mjpeg.fps = 30.0;
+    mjpeg.hasAudio = false;
+    mjpeg.hasPtz = true;
+    mjpeg.rtspUri = QStringLiteral("rtsp://192.168.1.96/cam/mjpeg");
+    mjpeg.httpUri = QStringLiteral("http://192.168.1.96/cam/mjpeg");
+    mjpeg.snapshotUri = QStringLiteral("http://192.168.1.96/onvif/snapshot.jpg?profile=Profile_cam_mjpeg");
+
+    const QVector<MediaProfile> orig{h264, mjpeg};
+    const QString json = serializeMediaProfiles(orig);
+    const QVector<MediaProfile> roundTrip = deserializeMediaProfiles(json);
+    CHECK(roundTrip.size() == 2);
+    CHECK(roundTrip.at(0).token == h264.token);
+    CHECK(roundTrip.at(0).audioEncoding == QStringLiteral("G711"));
+    CHECK(roundTrip.at(0).media2RtspUri == h264.media2RtspUri);
+    CHECK(roundTrip.at(1).httpUri == mjpeg.httpUri);
+    CHECK(roundTrip.at(1).snapshotUri == mjpeg.snapshotUri);
+
+    const QVector<StreamOptionEntry> opts = buildSelectableStreamOptions(roundTrip);
+    CHECK(opts.size() == 6); // rtsp + rtsp2 + snap for h264; rtsp + http + snap for mjpeg
+
+    SourceConfig cfg;
+    cfg.username = QStringLiteral("admin");
+    cfg.password = QStringLiteral("pw");
+    cfg.profileToken = QStringLiteral("Profile_cam_mjpeg");
+    cfg.rtspUri = mjpeg.httpUri;
+    cfg.snapshotUri = mjpeg.snapshotUri;
+    cfg.rtspTransport = QStringLiteral("http_mjpeg");
+    CHECK(findMatchingStreamOptionId(opts, cfg) == QStringLiteral("http::Profile_cam_mjpeg"));
+
+    cfg.rtspTransport = QStringLiteral("http_snapshot");
+    CHECK(findMatchingStreamOptionId(opts, cfg) == QStringLiteral("snapshot::Profile_cam_mjpeg"));
+
+    ResolvedStreamParams snapParams = buildResolvedStreamParams(cfg);
+    CHECK(snapParams.useHttpSnapshot == true);
+    CHECK(snapParams.effectiveUri == mjpeg.snapshotUri);
+
+    cfg.rtspUri = h264.rtspUri;
+    cfg.rtspTransport = QStringLiteral("udp");
+    cfg.latencyMode = QStringLiteral("zero");
+    cfg.enableAudio = false;
+    cfg.extraFfmpegOptions = QStringLiteral("rtbufsize=1024");
+    ResolvedStreamParams pZero = buildResolvedStreamParams(cfg);
+    CHECK(!pZero.useHttpSnapshot);
+    CHECK(pZero.bufferingMb == 0);
+    CHECK(pZero.asyncUnbuffered && pZero.asyncDecoupled);
+    CHECK(pZero.ffmpegOptions.contains(QStringLiteral("rtsp_transport=udp")));
+    CHECK(pZero.ffmpegOptions.contains(QStringLiteral("allowed_media_types=video")));
+    CHECK(pZero.ffmpegOptions.contains(QStringLiteral("analyzeduration=0")));
+    CHECK(pZero.ffmpegOptions.contains(QStringLiteral("rtbufsize=1024")));
+
+    for (const QString &tr : {QStringLiteral("tcp"), QStringLiteral("udp_multicast"),
+                              QStringLiteral("http"), QStringLiteral("auto")}) {
+        cfg.rtspTransport = tr;
+        cfg.latencyMode = QStringLiteral("balanced");
+        cfg.bufferingMb = 2;
+        cfg.enableAudio = true;
+        ResolvedStreamParams p = buildResolvedStreamParams(cfg);
+        CHECK(!p.useHttpSnapshot);
+        CHECK(p.bufferingMb == 2);
+        CHECK(!p.ffmpegOptions.contains(QStringLiteral("allowed_media_types=video")));
+        if (tr != QStringLiteral("auto")) {
+            CHECK(p.ffmpegOptions.contains(QStringLiteral("rtsp_transport=%1").arg(tr)));
+        }
+    }
+
+    cfg.rtspTransport = QStringLiteral("tcp");
+    cfg.latencyMode = QStringLiteral("standard");
+    ResolvedStreamParams pStd = buildResolvedStreamParams(cfg);
+    CHECK(!pStd.asyncUnbuffered);
+    CHECK(!pStd.asyncDecoupled);
+
+    cfg.rtspUri = mjpeg.httpUri;
+    cfg.rtspTransport = QStringLiteral("http_mjpeg");
+    cfg.inputFormat = QStringLiteral("mpjpeg");
+    ResolvedStreamParams pHttp = buildResolvedStreamParams(cfg);
+    CHECK(pHttp.inputFormat == QStringLiteral("mpjpeg"));
+    CHECK(pHttp.ffmpegOptions.contains(QStringLiteral("reconnect=1")));
+}
+
+void testPanoramaAreaZoomMapping()
+{
+    PanoramaMeta meta;
+    meta.width = 960;
+    meta.height = 540;
+    meta.cols = 2;
+    meta.rows = 2;
+    meta.panMin = -0.8;
+    meta.panMax = 0.8;
+    meta.tiltMin = -0.4;
+    meta.tiltMax = 0.4;
+    meta.scanZoom = 0.1;
+
+    for (int r = 0; r < 2; ++r) {
+        for (int c = 0; c < 2; ++c) {
+            PanoramaTileMeta t;
+            t.col = c;
+            t.row = r;
+            t.pan = (c == 0) ? -0.4 : 0.4;
+            t.tilt = (r == 0) ? 0.2 : -0.2;
+            t.centerX = (c == 0) ? 240.0 : 720.0;
+            t.centerY = (r == 0) ? 135.0 : 405.0;
+            t.tileW = 480.0;
+            t.tileH = 270.0;
+            meta.tiles.push_back(t);
+        }
+    }
+
+    double pan = 0.0, tilt = 0.0, zoom = 0.0;
+    // Box matching exactly 1 tile -> zoom stays at scanZoom
+    CHECK(PanoramaMapper::rectToPanTiltZoom(meta, QRectF(0.0, 0.0, 480.0, 270.0), pan, tilt, zoom, 12.0));
+    CHECK(std::abs(zoom - 0.1) < 1e-4);
+
+    // Box half the tile size (2x closer) -> magnification ≈ 2.0
+    CHECK(PanoramaMapper::rectToPanTiltZoom(meta, QRectF(120.0, 67.5, 240.0, 135.0), pan, tilt, zoom, 12.0));
+    const double mag2 = PanoramaMapper::zoomToMagnification(zoom, meta.scanZoom, 12.0);
+    CHECK(std::abs(mag2 - 2.0) < 1e-3);
+
+    // Oversized box -> safely clamped to >= 0.0
+    CHECK(PanoramaMapper::rectToPanTiltZoom(meta, QRectF(0.0, 0.0, 960.0, 540.0), pan, tilt, zoom, 12.0));
+    CHECK(zoom >= 0.0 && zoom <= 1.0);
+
+    // Inverted Pan/Tilt axes preserve direction
+    PanoramaMeta inv = meta;
+    inv.invertPan = true;
+    inv.invertTilt = true;
+    for (PanoramaTileMeta &t : inv.tiles) {
+        t.pan = -t.pan;
+        t.tilt = -t.tilt;
+    }
+    double panLeft = 0.0, panRight = 0.0, tTmp = 0.0, zTmp = 0.0;
+    CHECK(PanoramaMapper::rectToPanTiltZoom(inv, QRectF(60.0, 100.0, 120.0, 80.0), panLeft, tTmp, zTmp, 12.0));
+    CHECK(PanoramaMapper::rectToPanTiltZoom(inv, QRectF(720.0, 100.0, 120.0, 80.0), panRight, tTmp, zTmp, 12.0));
+    CHECK(panLeft > panRight);
+
+    // PanoramaStore persistence of maxOpticalZoom
+    QTemporaryDir tmpDir;
+    CHECK(tmpDir.isValid());
+    PanoramaStore store(tmpDir.path());
+    CameraPtzProfile prof;
+    prof.cameraKey = QStringLiteral("zoom_cal_test");
+    prof.maxOpticalZoom = 20.0;
+    CHECK(store.saveProfile(prof));
+    CameraPtzProfile loaded;
+    QImage dummy;
+    CHECK(store.loadProfile(prof.cameraKey, QString(), loaded, dummy));
+    CHECK(std::abs(loaded.maxOpticalZoom - 20.0) < 1e-6);
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -540,6 +711,8 @@ int main(int argc, char *argv[])
     testProfilesUrisPresetsAndFaults();
     testPtzStatusLimitsAndKeys();
     testPanoramaBuilderMapperAndStore();
+    testStreamOptionsAndProfilesSerialization();
+    testPanoramaAreaZoomMapping();
 
     if (g_failures > 0) {
         std::fprintf(stderr, "%d test check(s) FAILED.\n", g_failures);

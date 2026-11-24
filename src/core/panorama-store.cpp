@@ -8,6 +8,8 @@
 #include <QJsonObject>
 #include <QSaveFile>
 
+#include <algorithm>
+
 namespace netdev {
 
 namespace {
@@ -151,6 +153,7 @@ bool readProfileJson(const QString &filePath, CameraPtzProfile &out)
     out.ptzServiceUrl = o.value(QStringLiteral("ptzServiceUrl")).toString();
     out.invertPan = o.value(QStringLiteral("invertPan")).toBool(false);
     out.invertTilt = o.value(QStringLiteral("invertTilt")).toBool(false);
+    out.maxOpticalZoom = std::clamp(o.value(QStringLiteral("maxOpticalZoom")).toDouble(12.0), 2.0, 40.0);
     if (o.contains(QStringLiteral("panorama")) && o.value(QStringLiteral("panorama")).isObject()) {
         out.panorama = panoramaMetaFromJson(o.value(QStringLiteral("panorama")).toObject());
     } else {
@@ -238,6 +241,7 @@ bool PanoramaStore::saveProfile(const CameraPtzProfile &profile) const
     o.insert(QStringLiteral("ptzServiceUrl"), profile.ptzServiceUrl);
     o.insert(QStringLiteral("invertPan"), profile.invertPan);
     o.insert(QStringLiteral("invertTilt"), profile.invertTilt);
+    o.insert(QStringLiteral("maxOpticalZoom"), std::clamp(profile.maxOpticalZoom, 2.0, 40.0));
     if (profile.panorama.isValid()) {
         o.insert(QStringLiteral("panorama"), panoramaMetaToJson(profile.panorama));
     }

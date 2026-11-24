@@ -9,6 +9,7 @@
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPointer>
+#include <QRectF>
 #include <QTimer>
 #include <QWidget>
 
@@ -17,6 +18,7 @@
 class QCheckBox;
 class QComboBox;
 class QDialog;
+class QDoubleSpinBox;
 class QLabel;
 class QListWidget;
 class QProgressBar;
@@ -53,6 +55,8 @@ private slots:
     void onScanFinished(bool ok, const QImage &panorama, const PanoramaMeta &meta, const QString &error);
     void onScanCancelled();
     void onPanoramaPointClicked(double pan, double tilt);
+    void onPanoramaAreaSelected(double pan, double tilt, double zoom, const QRectF &imageRect);
+    void onMaxOpticalZoomChanged(double value);
     void onPanoramaPresetPinClicked(const QString &presetId);
     void onPanoramaZoomRequested(int deltaSteps);
     void onOpenBigPanoramaClicked();
@@ -113,6 +117,8 @@ private:
     double m_targetPan = 0.0;
     double m_targetTilt = 0.0;
     bool m_hasTarget = false;
+    QRectF m_targetBoxImage;
+    bool m_hasTargetBox = false;
 
     double m_vJoyPan = 0.0;
     double m_vJoyTilt = 0.0;
@@ -144,6 +150,7 @@ private:
     QPushButton *m_cancelScanBtn = nullptr;
     QPushButton *m_capturePanoBtn = nullptr;
     QPushButton *m_bigViewBtn = nullptr;
+    QDoubleSpinBox *m_maxOpticalZoomSpin = nullptr;
     QPointer<QDialog> m_bigViewDialog;
     QPointer<PanoramaViewWidget> m_bigPanoramaView;
 

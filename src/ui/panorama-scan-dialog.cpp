@@ -98,8 +98,8 @@ void PanoramaScanDialog::setupUi(const PtzCameraEntry &cam,
     panRow->addWidget(m_panMaxSpin);
 
     auto *tiltRow = new QHBoxLayout();
-    m_tiltMinSpin = makeCoordSpin(-0.45, -1.0, 1.0);
-    m_tiltMaxSpin = makeCoordSpin(0.45, -1.0, 1.0);
+    m_tiltMinSpin = makeCoordSpin(-0.85, -1.0, 1.0);
+    m_tiltMaxSpin = makeCoordSpin(0.85, -1.0, 1.0);
     tiltRow->addWidget(m_tiltMinSpin);
     tiltRow->addWidget(new QLabel(QStringLiteral("a"), rangeGroup));
     tiltRow->addWidget(m_tiltMaxSpin);

@@ -137,8 +137,8 @@ struct PanoramaScanSettings {
     int rows = 3;
     double panMin = -0.85;
     double panMax = 0.85;
-    double tiltMin = -0.45;
-    double tiltMax = 0.45;
+    double tiltMin = -0.85;
+    double tiltMax = 0.85;
     double scanZoom = 0.0;
     int settleDelayMs = 900;
     int moveTimeoutMs = 3500;

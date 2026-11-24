@@ -17,7 +17,7 @@ constexpr int kMaxPanoramaWidth = 4096;
 constexpr int kRegWidth = 160;
 constexpr int kMaxRefineShiftPx = 12;
 constexpr double kDefaultStepRatio = 0.72;
-constexpr double kMinStepRatio = 0.28;
+constexpr double kMinStepRatio = 0.06;
 constexpr double kMaxStepRatio = 0.95;
 
 struct GrayImage {
@@ -82,7 +82,7 @@ PairMatch estimateHorizontalPair(const GrayImage &left, const GrayImage &right, 
     const int w = left.width;
     const int h = left.height;
     const int minOv = std::max(8, static_cast<int>(std::round(w * (1.0 - kMaxStepRatio))));
-    const int maxOv = std::min(w - 8, static_cast<int>(std::round(w * (1.0 - kMinStepRatio))));
+    const int maxOv = std::min(w - 4, static_cast<int>(std::round(w * (1.0 - kMinStepRatio))));
     if (minOv >= maxOv) {
         return res;
     }
@@ -143,7 +143,7 @@ PairMatch estimateVerticalPair(const GrayImage &top, const GrayImage &bottom, in
     const int w = top.width;
     const int h = top.height;
     const int minOv = std::max(8, static_cast<int>(std::round(h * (1.0 - kMaxStepRatio))));
-    const int maxOv = std::min(h - 8, static_cast<int>(std::round(h * (1.0 - kMinStepRatio))));
+    const int maxOv = std::min(h - 4, static_cast<int>(std::round(h * (1.0 - kMinStepRatio))));
     if (minOv >= maxOv) {
         return res;
     }
@@ -649,6 +649,10 @@ bool PanoramaMapper::pixelToPanTilt(const PanoramaMeta &meta,
     const double maxPan = std::max(meta.panMin, meta.panMax);
     const double minTilt = std::min(meta.tiltMin, meta.tiltMax);
     const double maxTilt = std::max(meta.tiltMin, meta.tiltMax);
+    const double limitPanMin = std::min(-1.0, minPan);
+    const double limitPanMax = std::max(1.0, maxPan);
+    const double limitTiltMin = std::min(-1.0, minTilt);
+    const double limitTiltMax = std::max(1.0, maxTilt);
 
     if (cols == 1 && rows == 1) {
         const double fx = clampedPx / static_cast<double>(std::max(1, meta.width));
@@ -668,7 +672,7 @@ bool PanoramaMapper::pixelToPanTilt(const PanoramaMeta &meta,
     if (cols >= 2) {
         c0 = findMonotonicBracket(colCenterX, clampedPx, true);
         c1 = c0 + 1;
-        u = safeFraction(clampedPx, colCenterX[c0], colCenterX[c1], -0.8, 1.8);
+        u = safeFraction(clampedPx, colCenterX[c0], colCenterX[c1], -6.0, 7.0);
     }
 
     int r0 = 0;
@@ -677,13 +681,28 @@ bool PanoramaMapper::pixelToPanTilt(const PanoramaMeta &meta,
     if (rows >= 2) {
         r0 = findMonotonicBracket(rowCenterY, clampedPy, true);
         r1 = r0 + 1;
-        v = safeFraction(clampedPy, rowCenterY[r0], rowCenterY[r1], -0.8, 1.8);
+        v = safeFraction(clampedPy, rowCenterY[r0], rowCenterY[r1], -6.0, 7.0);
     }
 
     const PanoramaTileMeta *t00 = grid[r0 * cols + c0];
     const PanoramaTileMeta *t10 = grid[r0 * cols + c1];
     const PanoramaTileMeta *t01 = grid[r1 * cols + c0];
     const PanoramaTileMeta *t11 = grid[r1 * cols + c1];
+
+    for (int iter = 0; iter < 2; ++iter) {
+        const double uClamp = std::clamp(u, 0.0, 1.0);
+        const double vClamp = std::clamp(v, 0.0, 1.0);
+        if (cols >= 2) {
+            const double x0 = lerp1(t00->centerX, t01->centerX, vClamp);
+            const double x1 = lerp1(t10->centerX, t11->centerX, vClamp);
+            u = safeFraction(clampedPx, x0, x1, -6.0, 7.0);
+        }
+        if (rows >= 2) {
+            const double y0 = lerp1(t00->centerY, t10->centerY, uClamp);
+            const double y1 = lerp1(t01->centerY, t11->centerY, uClamp);
+            v = safeFraction(clampedPy, y0, y1, -6.0, 7.0);
+        }
+    }
 
     if (cols == 1) {
         const double fx = clampedPx / static_cast<double>(std::max(1, meta.width));
@@ -693,7 +712,8 @@ bool PanoramaMapper::pixelToPanTilt(const PanoramaMeta &meta,
                      ? lerp1(t00->pan, t01->pan, std::clamp(v, 0.0, 1.0))
                      : lerp1(leftPan, rightPan, fx);
     } else {
-        panOut = std::clamp(bilerp(t00->pan, t10->pan, t01->pan, t11->pan, u, v), minPan, maxPan);
+        panOut = std::clamp(bilerp(t00->pan, t10->pan, t01->pan, t11->pan, u, v),
+                            limitPanMin, limitPanMax);
     }
 
     if (rows == 1) {
@@ -704,7 +724,8 @@ bool PanoramaMapper::pixelToPanTilt(const PanoramaMeta &meta,
                       ? lerp1(t00->tilt, t10->tilt, std::clamp(u, 0.0, 1.0))
                       : lerp1(topTilt, bottomTilt, fy);
     } else {
-        tiltOut = std::clamp(bilerp(t00->tilt, t10->tilt, t01->tilt, t11->tilt, u, v), minTilt, maxTilt);
+        tiltOut = std::clamp(bilerp(t00->tilt, t10->tilt, t01->tilt, t11->tilt, u, v),
+                             limitTiltMin, limitTiltMax);
     }
 
     return true;
@@ -727,8 +748,12 @@ bool PanoramaMapper::panTiltToPixel(const PanoramaMeta &meta,
     const double maxPan = std::max(meta.panMin, meta.panMax);
     const double minTilt = std::min(meta.tiltMin, meta.tiltMax);
     const double maxTilt = std::max(meta.tiltMin, meta.tiltMax);
-    const double clampedPan = std::clamp(pan, minPan, maxPan);
-    const double clampedTilt = std::clamp(tilt, minTilt, maxTilt);
+    const double limitPanMin = std::min(-1.0, minPan);
+    const double limitPanMax = std::max(1.0, maxPan);
+    const double limitTiltMin = std::min(-1.0, minTilt);
+    const double limitTiltMax = std::max(1.0, maxTilt);
+    const double clampedPan = std::clamp(pan, limitPanMin, limitPanMax);
+    const double clampedTilt = std::clamp(tilt, limitTiltMin, limitTiltMax);
 
     if (cols == 1 && rows == 1) {
         const double leftPan = meta.invertPan ? maxPan : minPan;
@@ -771,7 +796,7 @@ bool PanoramaMapper::panTiltToPixel(const PanoramaMeta &meta,
         const bool panAscending = (colPan.last() >= colPan.first());
         c0 = findMonotonicBracket(colPan, clampedPan, panAscending);
         c1 = c0 + 1;
-        u = safeFraction(clampedPan, colPan[c0], colPan[c1], -0.8, 1.8);
+        u = safeFraction(clampedPan, colPan[c0], colPan[c1], -6.0, 7.0);
     }
 
     int r0 = 0;
@@ -781,13 +806,28 @@ bool PanoramaMapper::panTiltToPixel(const PanoramaMeta &meta,
         const bool tiltAscending = (rowTilt.last() >= rowTilt.first());
         r0 = findMonotonicBracket(rowTilt, clampedTilt, tiltAscending);
         r1 = r0 + 1;
-        v = safeFraction(clampedTilt, rowTilt[r0], rowTilt[r1], -0.8, 1.8);
+        v = safeFraction(clampedTilt, rowTilt[r0], rowTilt[r1], -6.0, 7.0);
     }
 
     const PanoramaTileMeta *t00 = grid[r0 * cols + c0];
     const PanoramaTileMeta *t10 = grid[r0 * cols + c1];
     const PanoramaTileMeta *t01 = grid[r1 * cols + c0];
     const PanoramaTileMeta *t11 = grid[r1 * cols + c1];
+
+    for (int iter = 0; iter < 2; ++iter) {
+        const double uClamp = std::clamp(u, 0.0, 1.0);
+        const double vClamp = std::clamp(v, 0.0, 1.0);
+        if (cols >= 2) {
+            const double p0 = lerp1(t00->pan, t01->pan, vClamp);
+            const double p1 = lerp1(t10->pan, t11->pan, vClamp);
+            u = safeFraction(clampedPan, p0, p1, -6.0, 7.0);
+        }
+        if (rows >= 2) {
+            const double tt0 = lerp1(t00->tilt, t10->tilt, uClamp);
+            const double tt1 = lerp1(t01->tilt, t11->tilt, uClamp);
+            v = safeFraction(clampedTilt, tt0, tt1, -6.0, 7.0);
+        }
+    }
 
     if (cols == 1) {
         const double leftPan = meta.invertPan ? maxPan : minPan;

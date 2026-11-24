@@ -696,6 +696,7 @@ void PtzDockWidget::onRefreshPositionClicked()
 
 void PtzDockWidget::scheduleStatusRefresh()
 {
+    m_movingPollCount = 0;
     m_statusRefreshTimer1.start();
     m_statusRefreshTimer2.start();
 }
@@ -724,6 +725,10 @@ void PtzDockWidget::queryCurrentStatus()
                 self->m_hasCurrentPos = true;
                 self->m_coordsLabel->setText(formatPtzSummary(st.position, true));
                 self->syncPanoramaViews();
+                if ((st.panTiltMoving || st.zoomMoving) && self->m_movingPollCount < 8) {
+                    ++self->m_movingPollCount;
+                    QTimer::singleShot(500, self.data(), &PtzDockWidget::queryCurrentStatus);
+                }
             }
         });
 }

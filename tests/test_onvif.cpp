@@ -695,6 +695,88 @@ void testPanoramaAreaZoomMapping()
     QImage dummy;
     CHECK(store.loadProfile(prof.cameraKey, QString(), loaded, dummy));
     CHECK(std::abs(loaded.maxOpticalZoom - 20.0) < 1e-6);
+
+    // Real Polycom MPTZ-9 geometry regression checks (wide panorama extending well beyond tile centers)
+    PanoramaMeta mptz;
+    mptz.width = 1537;
+    mptz.height = 430;
+    mptz.cols = 5;
+    mptz.rows = 3;
+    mptz.panMin = -0.85;
+    mptz.panMax = 0.85;
+    mptz.tiltMin = -0.45;
+    mptz.tiltMax = 0.452;
+    mptz.scanZoom = 0.0;
+    const double colPans[5] = {-0.849, -0.427, -0.001, 0.423, 0.846};
+    const double colXs[5] = {243.0, 508.0, 772.0, 1026.0, 1295.0};
+    const double rowTilts[3] = {0.452, 0.0, -0.448};
+    const double rowYs[3] = {141.0, 216.0, 290.0};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 5; ++c) {
+            PanoramaTileMeta t;
+            t.col = c;
+            t.row = r;
+            t.pan = colPans[c];
+            t.tilt = rowTilts[r];
+            t.centerX = colXs[c];
+            t.centerY = rowYs[r];
+            t.tileW = 480.0;
+            t.tileH = 270.0;
+            mptz.tiles.push_back(t);
+        }
+    }
+
+    // 1) Click/drag above row 0 extrapolates > 0.80 instead of clamping at 0.452
+    double tAbove = 0.0;
+    CHECK(PanoramaMapper::pixelToPanTilt(mptz, 772.0, 65.0, pan, tAbove));
+    CHECK(tAbove > 0.80);
+
+    // 2) Preset "cara jorge" (0.011, 0.96) maps above row 0 and round-trips accurately
+    double pxJ = 0.0, pyJ = 0.0;
+    CHECK(PanoramaMapper::panTiltToPixel(mptz, 0.011, 0.96, pxJ, pyJ));
+    CHECK(pyJ < 80.0);
+    double panJ = 0.0, tiltJ = 0.0;
+    CHECK(PanoramaMapper::pixelToPanTilt(mptz, pxJ, pyJ, panJ, tiltJ));
+    CHECK(std::abs(panJ - 0.011) < 0.01);
+    CHECK(std::abs(tiltJ - 0.96) < 0.01);
+
+    // 3) Click below row 2 extrapolates < -0.80 and round-trips accurately
+    double pBelow = 0.0, tBelow = 0.0;
+    CHECK(PanoramaMapper::pixelToPanTilt(mptz, 772.0, 365.0, pBelow, tBelow));
+    CHECK(tBelow < -0.80);
+    double pxB = 0.0, pyB = 0.0;
+    CHECK(PanoramaMapper::panTiltToPixel(mptz, pBelow, tBelow, pxB, pyB));
+    CHECK(std::abs(pxB - 772.0) < 1.5);
+    CHECK(std::abs(pyB - 365.0) < 1.5);
+
+    // 4) Synthetic 1x2 vertical stitch with 20% step (54px on 270px tiles) isn't inflated to 28%
+    QImage vMaster(480, 324, QImage::Format_RGB32);
+    QPainter vPainter(&vMaster);
+    for (int gy = 0; gy < 324; gy += 27) {
+        for (int gx = 0; gx < 480; gx += 40) {
+            const int r = (gx * 37 + gy * 17) % 200 + 30;
+            const int g = (gx * 73 + gy * 89) % 200 + 30;
+            const int b = (gx * 19 + gy * 131) % 200 + 30;
+            vPainter.fillRect(gx + 1, gy + 1, 37, 24, QColor(r, g, b));
+            vPainter.setPen(Qt::white);
+            vPainter.drawLine(gx, gy, gx + 39, gy + 26);
+        }
+    }
+    PanoramaScanSettings vCfg;
+    vCfg.cols = 1;
+    vCfg.rows = 2;
+    vCfg.panMin = 0.0;
+    vCfg.panMax = 0.0;
+    vCfg.tiltMin = -0.45;
+    vCfg.tiltMax = 0.45;
+    QVector<CapturedTile> vTiles;
+    CapturedTile vt0{0, 0, 0.0, 0.45, vMaster.copy(0, 0, 480, 270)};
+    CapturedTile vt1{0, 1, 0.0, -0.45, vMaster.copy(0, 54, 480, 270)};
+    vTiles.push_back(vt0);
+    vTiles.push_back(vt1);
+    const PanoramaBuildResult vRes = PanoramaBuilder::build(vTiles, vCfg);
+    CHECK(vRes.ok);
+    CHECK(vRes.image.height() < 335);
 }
 
 } // namespace

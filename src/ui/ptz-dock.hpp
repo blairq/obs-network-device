@@ -127,6 +127,7 @@ private:
     double m_pJoyZoom = 0.0;
     double m_btnZoomDir = 0.0;
     bool m_isMovingContinuous = false;
+    int m_movingPollCount = 0;
     QElapsedTimer m_moveThrottleTimer;
     QTimer m_wheelStopTimer;
     QTimer m_statusRefreshTimer1;

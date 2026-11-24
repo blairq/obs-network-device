@@ -6,6 +6,7 @@
 #include "ui/device-explorer-dialog.hpp"
 
 #include <obs-frontend-api.h>
+#include <util/platform.h>
 
 #include <QApplication>
 #include <QDialog>
@@ -13,10 +14,28 @@
 #include <QUrl>
 #include <QWidget>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
+#include <condition_variable>
+#include <cstring>
+#include <deque>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 namespace {
+
+constexpr size_t kMaxQueuedAudioPackets = 12;
+
+struct AudioPacket {
+    uint32_t frames = 0;
+    uint32_t samplesPerSec = 0;
+    enum speaker_layout speakers = SPEAKERS_UNKNOWN;
+    uint8_t planeCount = 0;
+    uint64_t captureTimeNs = 0;
+    std::array<std::vector<float>, MAX_AV_PLANES> planes;
+};
 
 constexpr const char *kPropExplorer = "open_explorer";
 constexpr const char *kPropReconnect = "reconnect_stream";
@@ -42,6 +61,15 @@ struct NetworkDeviceSource {
     obs_source_t *mediaSource = nullptr;
     std::mutex mutex;
     std::atomic<bool> destroying{false};
+    std::atomic<uint32_t> cachedWidth{0};
+    std::atomic<uint32_t> cachedHeight{0};
+
+    std::mutex audioQueueMutex;
+    std::condition_variable audioQueueCv;
+    std::deque<AudioPacket> audioQueue;
+    bool audioStopRequested = false;
+    bool audioResetPending = false;
+    std::thread audioThread;
 
     QString sourceUuid;
     netdev::SourceConfig config;
@@ -72,6 +100,13 @@ QString redactUriPassword(const QString &uri)
     return u.toString();
 }
 
+void resetAudioQueue(NetworkDeviceSource *self)
+{
+    std::lock_guard<std::mutex> lock(self->audioQueueMutex);
+    self->audioQueue.clear();
+    self->audioResetPending = true;
+}
+
 void onChildAudioCaptured(void *param,
                           obs_source_t *childSource,
                           const struct audio_data *audioData,
@@ -85,25 +120,123 @@ void onChildAudioCaptured(void *param,
     }
 
     struct obs_audio_info oai {};
-    if (!obs_get_audio_info(&oai)) {
+    if (!obs_get_audio_info(&oai) || oai.samples_per_sec == 0) {
         return;
     }
 
-    struct obs_source_audio out {};
-    for (size_t i = 0; i < MAX_AV_PLANES; ++i) {
-        out.data[i] = audioData->data[i];
+    const size_t channels = get_audio_channels(oai.speakers);
+    const size_t planeCount = std::min<size_t>(channels, MAX_AV_PLANES);
+    if (planeCount == 0) {
+        return;
     }
-    out.frames = audioData->frames;
-    out.speakers = oai.speakers;
-    out.format = AUDIO_FORMAT_FLOAT_PLANAR;
-    out.samples_per_sec = oai.samples_per_sec;
-    out.timestamp = audioData->timestamp;
 
-    obs_source_output_audio(self->source, &out);
+    AudioPacket pkt;
+    pkt.frames = audioData->frames;
+    pkt.samplesPerSec = oai.samples_per_sec;
+    pkt.speakers = oai.speakers;
+    pkt.planeCount = static_cast<uint8_t>(planeCount);
+    pkt.captureTimeNs = os_gettime_ns();
+
+    const size_t byteCount = static_cast<size_t>(audioData->frames) * sizeof(float);
+    for (size_t i = 0; i < planeCount; ++i) {
+        pkt.planes[i].resize(audioData->frames);
+        if (audioData->data[i]) {
+            std::memcpy(pkt.planes[i].data(), audioData->data[i], byteCount);
+        } else {
+            std::fill(pkt.planes[i].begin(), pkt.planes[i].end(), 0.0f);
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(self->audioQueueMutex);
+        if (self->audioStopRequested) {
+            return;
+        }
+        while (self->audioQueue.size() >= kMaxQueuedAudioPackets) {
+            self->audioQueue.pop_front();
+        }
+        self->audioQueue.push_back(std::move(pkt));
+    }
+    self->audioQueueCv.notify_one();
+}
+
+void audioForwardThreadLoop(NetworkDeviceSource *self)
+{
+    uint64_t virtualPts = 0;
+    uint64_t lastWallNs = 0;
+    uint64_t lastDurNs = 0;
+
+    for (;;) {
+        AudioPacket pkt;
+        bool resetPending = false;
+        {
+            std::unique_lock<std::mutex> lock(self->audioQueueMutex);
+            self->audioQueueCv.wait(lock, [self]() {
+                return self->audioStopRequested || !self->audioQueue.empty();
+            });
+            if (self->audioStopRequested) {
+                break;
+            }
+            resetPending = self->audioResetPending;
+            self->audioResetPending = false;
+            pkt = std::move(self->audioQueue.front());
+            self->audioQueue.pop_front();
+        }
+
+        if (self->destroying.load(std::memory_order_acquire)) {
+            break;
+        }
+
+        const uint64_t nowNs = pkt.captureTimeNs;
+        const uint64_t durNs =
+            (static_cast<uint64_t>(pkt.frames) * 1000000000ULL) / pkt.samplesPerSec;
+
+        if (virtualPts == 0) {
+            virtualPts = (nowNs > 20000000000ULL) ? 1000000000ULL : (nowNs + 20000000000ULL);
+        } else if (resetPending || lastWallNs == 0 || nowNs < lastWallNs ||
+                   (nowNs - lastWallNs) > 200000000ULL) {
+            virtualPts += 3000000000ULL;
+        } else {
+            virtualPts += lastDurNs;
+        }
+
+        lastWallNs = nowNs;
+        lastDurNs = durNs;
+
+        struct obs_source_audio out {};
+        for (uint8_t i = 0; i < pkt.planeCount; ++i) {
+            out.data[i] = reinterpret_cast<const uint8_t *>(pkt.planes[i].data());
+        }
+        out.frames = pkt.frames;
+        out.speakers = pkt.speakers;
+        out.format = AUDIO_FORMAT_FLOAT_PLANAR;
+        out.samples_per_sec = pkt.samplesPerSec;
+        out.timestamp = virtualPts;
+
+        obs_source_output_audio(self->source, &out);
+    }
+}
+
+void refreshCachedDimensions(NetworkDeviceSource *self, obs_source_t *child)
+{
+    if (!self) {
+        return;
+    }
+    if (child) {
+        self->cachedWidth.store(obs_source_get_base_width(child), std::memory_order_relaxed);
+        self->cachedHeight.store(obs_source_get_base_height(child), std::memory_order_relaxed);
+    } else {
+        self->cachedWidth.store(0, std::memory_order_relaxed);
+        self->cachedHeight.store(0, std::memory_order_relaxed);
+    }
 }
 
 void detachAndReleaseChild(NetworkDeviceSource *self)
 {
+    self->cachedWidth.store(0, std::memory_order_relaxed);
+    self->cachedHeight.store(0, std::memory_order_relaxed);
+    resetAudioQueue(self);
+
     obs_source_t *childToRelease = nullptr;
     {
         std::lock_guard<std::mutex> lock(self->mutex);
@@ -133,7 +266,6 @@ void pushSettingsToChild(NetworkDeviceSource *self,
         return;
     }
 
-    obs_source_t *existingChild = nullptr;
     {
         std::lock_guard<std::mutex> lock(self->mutex);
         if (!forceRestart && self->mediaSource &&
@@ -143,13 +275,6 @@ void pushSettingsToChild(NetworkDeviceSource *self,
             self->activeLowLatency == cfg.lowLatency) {
             return;
         }
-        if (self->mediaSource) {
-            existingChild = obs_source_get_ref(self->mediaSource);
-        }
-        self->activeEffectiveUri = effectiveUri;
-        self->activeTransport = cfg.rtspTransport;
-        self->activeHwDecode = cfg.hwDecode;
-        self->activeLowLatency = cfg.lowLatency;
     }
 
     QString ffOpts = (cfg.rtspTransport == QStringLiteral("udp"))
@@ -174,46 +299,46 @@ void pushSettingsToChild(NetworkDeviceSource *self,
     obs_data_set_bool(childData, "clear_on_media_end", false);
     obs_data_set_string(childData, "ffmpeg_options", ffOptsUtf8.constData());
 
-    if (existingChild) {
-        obs_source_set_async_unbuffered(existingChild, cfg.lowLatency);
-        obs_source_set_async_decoupled(existingChild, cfg.lowLatency);
-        obs_source_update(existingChild, childData);
-        obs_source_release(existingChild);
-    } else {
-        const QByteArray childName =
-            QStringLiteral("%1_ffmpeg").arg(self->sourceUuid).toUtf8();
-        obs_source_t *newChild =
-            obs_source_create_private("ffmpeg_source", childName.constData(), childData);
-        if (newChild) {
-            obs_source_set_audio_mixers(newChild, 0);
-            obs_source_set_async_unbuffered(newChild, cfg.lowLatency);
-            obs_source_set_async_decoupled(newChild, cfg.lowLatency);
-            obs_source_add_audio_capture_callback(newChild, onChildAudioCaptured, self);
+    const QByteArray childName =
+        QStringLiteral("%1_ffmpeg").arg(self->sourceUuid).toUtf8();
+    obs_source_t *newChild =
+        obs_source_create_private("ffmpeg_source", childName.constData(), childData);
+    if (newChild) {
+        obs_source_set_audio_mixers(newChild, 0);
+        obs_source_set_async_unbuffered(newChild, cfg.lowLatency);
+        obs_source_set_async_decoupled(newChild, cfg.lowLatency);
+        obs_source_add_audio_capture_callback(newChild, onChildAudioCaptured, self);
 
-            obs_source_t *oldChild = nullptr;
-            {
-                std::lock_guard<std::mutex> lock(self->mutex);
-                oldChild = self->mediaSource;
-                self->mediaSource = newChild;
-            }
-            obs_source_add_active_child(self->source, newChild);
-            if (oldChild) {
-                obs_source_remove_audio_capture_callback(oldChild, onChildAudioCaptured, self);
-                obs_source_remove_active_child(self->source, oldChild);
-                obs_source_release(oldChild);
-            }
+        obs_source_t *oldChild = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(self->mutex);
+            oldChild = self->mediaSource;
+            self->mediaSource = newChild;
+            self->activeEffectiveUri = effectiveUri;
+            self->activeTransport = cfg.rtspTransport;
+            self->activeHwDecode = cfg.hwDecode;
+            self->activeLowLatency = cfg.lowLatency;
+        }
+        resetAudioQueue(self);
+        obs_source_add_active_child(self->source, newChild);
+        if (oldChild) {
+            obs_source_remove_audio_capture_callback(oldChild, onChildAudioCaptured, self);
+            obs_source_remove_active_child(self->source, oldChild);
+            obs_source_release(oldChild);
         }
     }
 
     obs_data_release(childData);
 
-    const QString safeUri = redactUriPassword(effectiveUri);
-    obs_log(LOG_INFO, "Configured RTSP stream (%s): %s [%s, hw_decode=%s, low_latency=%s]",
-            self->sourceUuid.toUtf8().constData(),
-            safeUri.toUtf8().constData(),
-            ffOptsUtf8.constData(),
-            cfg.hwDecode ? "true" : "false",
-            cfg.lowLatency ? "true" : "false");
+    if (newChild) {
+        const QString safeUri = redactUriPassword(effectiveUri);
+        obs_log(LOG_INFO, "Configured RTSP stream (%s): %s [%s, hw_decode=%s, low_latency=%s]",
+                self->sourceUuid.toUtf8().constData(),
+                safeUri.toUtf8().constData(),
+                ffOptsUtf8.constData(),
+                cfg.hwDecode ? "true" : "false",
+                cfg.lowLatency ? "true" : "false");
+    }
 }
 
 void syncPtzRegistry(NetworkDeviceSource *self)
@@ -273,6 +398,9 @@ void *networkDeviceCreate(obs_data_t *settings, obs_source_t *source)
     auto *self = new NetworkDeviceSource();
     self->source = source;
     self->sourceUuid = safeSourceUuid(source);
+    obs_source_set_async_unbuffered(source, true);
+    obs_source_set_async_decoupled(source, true);
+    self->audioThread = std::thread(audioForwardThreadLoop, self);
 
     networkDeviceUpdate(self, settings);
     obs_log(LOG_INFO, "Created network_device_source (%s)",
@@ -290,6 +418,17 @@ void networkDeviceDestroy(void *data)
     self->destroying.store(true, std::memory_order_release);
     netdev::DeviceRegistry::instance().unregisterCamera(self->sourceUuid);
     detachAndReleaseChild(self);
+
+    {
+        std::lock_guard<std::mutex> lock(self->audioQueueMutex);
+        self->audioStopRequested = true;
+        self->audioQueue.clear();
+    }
+    self->audioQueueCv.notify_all();
+    if (self->audioThread.joinable()) {
+        self->audioThread.join();
+    }
+
     delete self;
 }
 
@@ -340,7 +479,6 @@ bool onReconnectClicked(obs_properties_t *props, obs_property_t *property, void 
         cfg = self->config;
     }
 
-    detachAndReleaseChild(self);
     pushSettingsToChild(self, cfg, true);
     return false;
 }
@@ -349,6 +487,7 @@ obs_properties_t *networkDeviceProperties(void *data)
 {
     UNUSED_PARAMETER(data);
     obs_properties_t *props = obs_properties_create();
+    obs_properties_set_flags(props, OBS_PROPERTIES_DEFER_UPDATE);
 
     obs_properties_add_button(props, kPropExplorer,
                               obs_module_text("NetworkDevice.ExplorerButton"),
@@ -402,33 +541,36 @@ obs_source_t *acquireChild(NetworkDeviceSource *self)
 
 uint32_t networkDeviceGetWidth(void *data)
 {
-    obs_source_t *child = acquireChild(static_cast<NetworkDeviceSource *>(data));
-    if (!child) {
-        return 0;
-    }
-    const uint32_t w = obs_source_get_width(child);
-    obs_source_release(child);
-    return w;
+    const auto *self = static_cast<const NetworkDeviceSource *>(data);
+    return self ? self->cachedWidth.load(std::memory_order_relaxed) : 0;
 }
 
 uint32_t networkDeviceGetHeight(void *data)
 {
-    obs_source_t *child = acquireChild(static_cast<NetworkDeviceSource *>(data));
-    if (!child) {
-        return 0;
+    const auto *self = static_cast<const NetworkDeviceSource *>(data);
+    return self ? self->cachedHeight.load(std::memory_order_relaxed) : 0;
+}
+
+void networkDeviceVideoTick(void *data, float seconds)
+{
+    UNUSED_PARAMETER(seconds);
+    auto *self = static_cast<NetworkDeviceSource *>(data);
+    obs_source_t *child = acquireChild(self);
+    refreshCachedDimensions(self, child);
+    if (child) {
+        obs_source_release(child);
     }
-    const uint32_t h = obs_source_get_height(child);
-    obs_source_release(child);
-    return h;
 }
 
 void networkDeviceVideoRender(void *data, gs_effect_t *effect)
 {
     UNUSED_PARAMETER(effect);
-    obs_source_t *child = acquireChild(static_cast<NetworkDeviceSource *>(data));
+    auto *self = static_cast<NetworkDeviceSource *>(data);
+    obs_source_t *child = acquireChild(self);
     if (!child) {
         return;
     }
+    refreshCachedDimensions(self, child);
     obs_source_video_render(child);
     obs_source_release(child);
 }
@@ -522,6 +664,7 @@ void registerNetworkDeviceSource()
     info.update = networkDeviceUpdate;
     info.get_width = networkDeviceGetWidth;
     info.get_height = networkDeviceGetHeight;
+    info.video_tick = networkDeviceVideoTick;
     info.video_render = networkDeviceVideoRender;
     info.enum_active_sources = networkDeviceEnumSources;
     info.enum_all_sources = networkDeviceEnumSources;

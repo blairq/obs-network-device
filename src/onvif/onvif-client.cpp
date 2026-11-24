@@ -73,6 +73,17 @@ OnvifClient::OnvifClient(QObject *parent) : QObject(parent)
             });
 }
 
+OnvifClient::~OnvifClient()
+{
+    const auto replies = m_nam.findChildren<QNetworkReply *>();
+    for (QNetworkReply *reply : replies) {
+        if (reply) {
+            reply->disconnect(this);
+            reply->abort();
+        }
+    }
+}
+
 QString OnvifClient::normalizeDeviceServiceUrl(const QString &hostOrUrl, quint16 defaultPort)
 {
     QString trimmed = hostOrUrl.trimmed();
@@ -181,7 +192,7 @@ void OnvifClient::sendSoapRequest(const QString &url,
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, url, soapAction, bodyXml, username, password, clockOffsetSecs, cb, useSoap11]() {
                 const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                const QByteArray body = reply->readAll();
+                const QByteArray body = reply->isOpen() ? reply->readAll() : QByteArray();
                 const QString netErr = reply->error() != QNetworkReply::NoError ? reply->errorString() : QString();
                 reply->deleteLater();
 
@@ -566,7 +577,7 @@ void OnvifClient::fetchSnapshot(const QString &snapshotUri, const QString &usern
 
     connect(reply, &QNetworkReply::finished, this, [this, gen, reply]() {
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const QByteArray bytes = reply->readAll();
+        const QByteArray bytes = reply->isOpen() ? reply->readAll() : QByteArray();
         const QString err = reply->error() != QNetworkReply::NoError ? reply->errorString() : QString();
         reply->deleteLater();
 

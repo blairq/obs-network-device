@@ -32,6 +32,8 @@ namespace {
 
 constexpr const char *kPtzDockId = "obs_network_device_ptz_dock";
 
+bool g_frontendExited = false;
+
 struct SceneScanContext {
     QString foundName;
 };
@@ -91,6 +93,11 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData)
         obs_source_t *prev = obs_frontend_get_current_preview_scene();
         notifyActivePtzForScene(prev);
         obs_source_release(prev);
+        break;
+    }
+    case OBS_FRONTEND_EVENT_EXIT: {
+        g_frontendExited = true;
+        obs_frontend_remove_dock(kPtzDockId);
         break;
     }
     default:
@@ -184,7 +191,9 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
-    obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
-    obs_frontend_remove_dock(kPtzDockId);
+    if (!g_frontendExited) {
+        obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
+        obs_frontend_remove_dock(kPtzDockId);
+    }
     obs_log(LOG_INFO, "plugin unloaded");
 }

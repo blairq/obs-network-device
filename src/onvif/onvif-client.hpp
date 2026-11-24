@@ -20,7 +20,7 @@ public:
     using PresetsCallback = std::function<void(bool ok, const QVector<PtzPreset> &presets, const QString &error)>;
 
     explicit OnvifClient(QObject *parent = nullptr);
-    ~OnvifClient() override = default;
+    ~OnvifClient() override;
 
     static QString normalizeDeviceServiceUrl(const QString &hostOrUrl, quint16 defaultPort = 80);
 

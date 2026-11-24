@@ -12,6 +12,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QListWidgetItem>
+#include <QPointer>
 #include <QPushButton>
 #include <QSlider>
 #include <QTimer>
@@ -243,12 +244,16 @@ void PtzDockWidget::sendMove(double panDir, double tiltDir, double zoomDir)
     }
 
     const double speed = static_cast<double>(m_speedSlider->value()) / 100.0;
+    QPointer<PtzDockWidget> self(this);
     m_client.continuousMove(
         cam.ptzServiceUrl, cam.profileToken, cam.username, cam.password, cam.clockOffsetSecs,
         panDir * speed, tiltDir * speed, zoomDir * speed,
-        [this](bool ok, const QString &err) {
+        [self](bool ok, const QString &err) {
+            if (!self) {
+                return;
+            }
             if (!ok) {
-                m_statusLabel->setText(QStringLiteral("PTZ: %1").arg(err));
+                self->m_statusLabel->setText(QStringLiteral("PTZ: %1").arg(err));
             }
         });
 }
@@ -270,11 +275,15 @@ void PtzDockWidget::onHomeClicked()
         return;
     }
     m_statusLabel->setText(QStringLiteral("Moviendo a Home..."));
+    QPointer<PtzDockWidget> self(this);
     m_client.gotoHome(cam.ptzServiceUrl, cam.profileToken, cam.username, cam.password,
                       cam.clockOffsetSecs,
-                      [this](bool ok, const QString &err) {
-                          m_statusLabel->setText(ok ? QStringLiteral("Posicion Home enviada.")
-                                                    : QStringLiteral("Home fallo: %1").arg(err));
+                      [self](bool ok, const QString &err) {
+                          if (!self) {
+                              return;
+                          }
+                          self->m_statusLabel->setText(ok ? QStringLiteral("Posicion Home enviada.")
+                                                          : QStringLiteral("Home fallo: %1").arg(err));
                       });
 }
 
@@ -286,19 +295,23 @@ void PtzDockWidget::onLoadPresetsClicked()
     }
 
     m_statusLabel->setText(QStringLiteral("Cargando presets..."));
+    QPointer<PtzDockWidget> self(this);
     m_client.getPresets(
         cam.ptzServiceUrl, cam.profileToken, cam.username, cam.password, cam.clockOffsetSecs,
-        [this](bool ok, const QVector<PtzPreset> &presets, const QString &err) {
-            m_presetsList->clear();
+        [self](bool ok, const QVector<PtzPreset> &presets, const QString &err) {
+            if (!self) {
+                return;
+            }
+            self->m_presetsList->clear();
             if (!ok) {
-                m_statusLabel->setText(QStringLiteral("Presets no disponibles: %1").arg(err));
+                self->m_statusLabel->setText(QStringLiteral("Presets no disponibles: %1").arg(err));
                 return;
             }
             for (const PtzPreset &p : presets) {
-                auto *item = new QListWidgetItem(p.name, m_presetsList);
+                auto *item = new QListWidgetItem(p.name, self->m_presetsList);
                 item->setData(Qt::UserRole, p.token);
             }
-            m_statusLabel->setText(QStringLiteral("%1 preset(s) cargado(s).").arg(presets.size()));
+            self->m_statusLabel->setText(QStringLiteral("%1 preset(s) cargado(s).").arg(presets.size()));
         });
 }
 
@@ -315,11 +328,15 @@ void PtzDockWidget::onGotoPresetClicked()
 
     const QString token = item->data(Qt::UserRole).toString();
     m_statusLabel->setText(QStringLiteral("Yendo a '%1'...").arg(item->text()));
+    QPointer<PtzDockWidget> self(this);
     m_client.gotoPreset(
         cam.ptzServiceUrl, cam.profileToken, token, cam.username, cam.password, cam.clockOffsetSecs,
-        [this](bool ok, const QString &err) {
-            m_statusLabel->setText(ok ? QStringLiteral("Preset aplicado.")
-                                      : QStringLiteral("Error al ir al preset: %1").arg(err));
+        [self](bool ok, const QString &err) {
+            if (!self) {
+                return;
+            }
+            self->m_statusLabel->setText(ok ? QStringLiteral("Preset aplicado.")
+                                            : QStringLiteral("Error al ir al preset: %1").arg(err));
         });
 }
 
@@ -338,15 +355,19 @@ void PtzDockWidget::onSavePresetClicked()
         return;
     }
 
+    QPointer<PtzDockWidget> self(this);
     m_client.setPreset(
         cam.ptzServiceUrl, cam.profileToken, name.trimmed(), cam.username, cam.password,
         cam.clockOffsetSecs,
-        [this](bool ok, const QString &err) {
+        [self](bool ok, const QString &err) {
+            if (!self) {
+                return;
+            }
             if (ok) {
-                m_statusLabel->setText(QStringLiteral("Preset guardado."));
-                QTimer::singleShot(300, this, &PtzDockWidget::onLoadPresetsClicked);
+                self->m_statusLabel->setText(QStringLiteral("Preset guardado."));
+                QTimer::singleShot(300, self.data(), &PtzDockWidget::onLoadPresetsClicked);
             } else {
-                m_statusLabel->setText(QStringLiteral("Error guardando preset: %1").arg(err));
+                self->m_statusLabel->setText(QStringLiteral("Error guardando preset: %1").arg(err));
             }
         });
 }
@@ -363,14 +384,18 @@ void PtzDockWidget::onRemovePresetClicked()
     }
 
     const QString token = item->data(Qt::UserRole).toString();
+    QPointer<PtzDockWidget> self(this);
     m_client.removePreset(
         cam.ptzServiceUrl, cam.profileToken, token, cam.username, cam.password, cam.clockOffsetSecs,
-        [this](bool ok, const QString &err) {
+        [self](bool ok, const QString &err) {
+            if (!self) {
+                return;
+            }
             if (ok) {
-                m_statusLabel->setText(QStringLiteral("Preset eliminado."));
-                QTimer::singleShot(300, this, &PtzDockWidget::onLoadPresetsClicked);
+                self->m_statusLabel->setText(QStringLiteral("Preset eliminado."));
+                QTimer::singleShot(300, self.data(), &PtzDockWidget::onLoadPresetsClicked);
             } else {
-                m_statusLabel->setText(QStringLiteral("Error borrando preset: %1").arg(err));
+                self->m_statusLabel->setText(QStringLiteral("Error borrando preset: %1").arg(err));
             }
         });
 }

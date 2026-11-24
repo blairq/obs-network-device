@@ -18,10 +18,19 @@ the Free Software Foundation; either version 2 of the License, or
 #include <obs-module.h>
 
 #include <QAction>
+#include <QApplication>
 #include <QDialog>
 #include <QDir>
+#include <QDockWidget>
+#include <QEvent>
+#include <QList>
+#include <QMenu>
+#include <QMetaObject>
 #include <QObject>
+#include <QPointer>
 #include <QString>
+#include <QThread>
+#include <QTimer>
 #include <QWidget>
 
 #include <cstring>
@@ -34,6 +43,158 @@ namespace {
 constexpr const char *kPtzDockId = "obs_network_device_ptz_dock";
 
 bool g_frontendExited = false;
+QPointer<netdev::PtzDockWidget> g_ptzDock;
+QObject *g_contextMenuFilter = nullptr;
+
+obs_source_t *getEditableSceneSource()
+{
+    obs_source_t *sceneSource = nullptr;
+    if (obs_frontend_preview_program_mode_active()) {
+        sceneSource = obs_frontend_get_current_preview_scene();
+    }
+    if (!sceneSource) {
+        sceneSource = obs_frontend_get_current_scene();
+    }
+    return sceneSource;
+}
+
+struct SelectedPtzScanContext {
+    QString foundUuid;
+};
+
+bool findSelectedPtzSourceInScene(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+{
+    Q_UNUSED(scene);
+    auto *ctx = static_cast<SelectedPtzScanContext *>(param);
+    if (!ctx || !item) {
+        return true;
+    }
+
+    if (obs_sceneitem_is_group(item)) {
+        obs_sceneitem_group_enum_items(item, findSelectedPtzSourceInScene, ctx);
+        if (!ctx->foundUuid.isEmpty()) {
+            return false;
+        }
+    }
+
+    if (!obs_sceneitem_selected(item)) {
+        return true;
+    }
+
+    obs_source_t *src = obs_sceneitem_get_source(item);
+    if (!src) {
+        return true;
+    }
+
+    const char *id = obs_source_get_id(src);
+    if (id && std::strcmp(id, "network_device_source") == 0) {
+        const char *uuid = obs_source_get_uuid(src);
+        if (uuid && uuid[0] != '\0') {
+            ctx->foundUuid = QString::fromUtf8(uuid);
+            return false;
+        }
+    }
+    return true;
+}
+
+QString findSelectedNetworkDeviceUuid()
+{
+    obs_source_t *sceneSource = getEditableSceneSource();
+    if (!sceneSource) {
+        return {};
+    }
+
+    SelectedPtzScanContext ctx;
+    if (obs_scene_t *scene = obs_scene_from_source(sceneSource)) {
+        obs_scene_enum_items(scene, findSelectedPtzSourceInScene, &ctx);
+    }
+    obs_source_release(sceneSource);
+    return ctx.foundUuid;
+}
+
+void cleanupContextMenuFilter()
+{
+    if (g_contextMenuFilter) {
+        if (qApp) {
+            qApp->removeEventFilter(g_contextMenuFilter);
+        }
+        delete g_contextMenuFilter;
+        g_contextMenuFilter = nullptr;
+    }
+}
+
+class SourceContextMenuFilter final : public QObject {
+public:
+    explicit SourceContextMenuFilter(QWidget *mainWin, QObject *parent = nullptr)
+        : QObject(parent), m_mainWin(mainWin)
+    {
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (g_frontendExited || !m_mainWin) {
+            return false;
+        }
+
+        const QEvent::Type evType = event->type();
+        if (evType != QEvent::Polish && evType != QEvent::Show) {
+            return false;
+        }
+
+        auto *menu = qobject_cast<QMenu *>(watched);
+        if (!menu || menu->parentWidget() != m_mainWin || !menu->objectName().isEmpty()) {
+            return false;
+        }
+
+        if (menu->property("obs_netdev_ptz_injected").toBool()) {
+            return false;
+        }
+
+        const QList<QAction *> actions = menu->actions();
+        bool hasCopySource = false;
+        bool hasRemoveSource = false;
+        for (QAction *act : actions) {
+            if (!act) {
+                continue;
+            }
+            const QString objName = act->objectName();
+            if (objName == QLatin1String("actionCopySource")) {
+                hasCopySource = true;
+            } else if (objName == QLatin1String("actionRemoveSource")) {
+                hasRemoveSource = true;
+            }
+        }
+        if (!hasCopySource || !hasRemoveSource) {
+            return false;
+        }
+
+        const QString selectedUuid = findSelectedNetworkDeviceUuid();
+        if (selectedUuid.isEmpty()) {
+            return false;
+        }
+
+        menu->setProperty("obs_netdev_ptz_injected", true);
+        QAction *beforeAction =
+            (actions.size() >= 2) ? actions.at(actions.size() - 2) : nullptr;
+        auto *ptzAction = new QAction(
+            QString::fromUtf8(obs_module_text("NetworkDevice.ContextMenuOpenPtz")), menu);
+        QObject::connect(ptzAction, &QAction::triggered, ptzAction, [selectedUuid]() {
+            QTimer::singleShot(0, qApp, [selectedUuid]() {
+                showNetworkDevicePtzDock(selectedUuid);
+            });
+        });
+        menu->insertAction(beforeAction, ptzAction);
+
+        if (evType == QEvent::Show) {
+            menu->adjustSize();
+        }
+        return false;
+    }
+
+private:
+    QPointer<QWidget> m_mainWin;
+};
 
 struct SceneScanContext {
     QString foundName;
@@ -98,7 +259,9 @@ void onFrontendEvent(enum obs_frontend_event event, void *privateData)
     }
     case OBS_FRONTEND_EVENT_EXIT: {
         g_frontendExited = true;
+        cleanupContextMenuFilter();
         obs_frontend_remove_dock(kPtzDockId);
+        g_ptzDock.clear();
         break;
     }
     default:
@@ -133,7 +296,7 @@ void openExplorerAndCreateSource()
         return;
     }
 
-    obs_source_t *sceneSource = obs_frontend_get_current_scene();
+    obs_source_t *sceneSource = getEditableSceneSource();
     if (!sceneSource) {
         return;
     }
@@ -158,6 +321,48 @@ void openExplorerAndCreateSource()
 
 } // namespace
 
+void showNetworkDevicePtzDock(const QString &sourceUuid)
+{
+    if (g_frontendExited || !qApp) {
+        return;
+    }
+
+    if (QThread::currentThread() != qApp->thread()) {
+        QMetaObject::invokeMethod(
+            qApp, [sourceUuid]() { showNetworkDevicePtzDock(sourceUuid); }, Qt::QueuedConnection);
+        return;
+    }
+
+    if (!g_ptzDock) {
+        return;
+    }
+
+    if (!sourceUuid.isEmpty()) {
+        g_ptzDock->selectCameraBySourceUuid(sourceUuid);
+    }
+
+    QDockWidget *dock = nullptr;
+    for (QWidget *w = g_ptzDock->parentWidget(); w; w = w->parentWidget()) {
+        if (auto *candidate = qobject_cast<QDockWidget *>(w)) {
+            dock = candidate;
+            break;
+        }
+    }
+    if (!dock) {
+        if (auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window())) {
+            dock = mainWin->findChild<QDockWidget *>(QString::fromLatin1(kPtzDockId));
+        }
+    }
+
+    if (dock) {
+        if (dock->isHidden()) {
+            dock->show();
+        }
+        dock->raise();
+        dock->activateWindow();
+    }
+}
+
 const char *obs_module_name(void)
 {
     return "OBS Network Device";
@@ -180,13 +385,28 @@ bool obs_module_load(void)
         QDir().mkpath(storageDir);
     }
     auto *ptzDock = new netdev::PtzDockWidget(storageDir, mainWin);
+    g_ptzDock = ptzDock;
     obs_frontend_add_dock_by_id(kPtzDockId, obs_module_text("NetworkDevice.PtzDockTitle"), ptzDock);
+
+    if (qApp) {
+        cleanupContextMenuFilter();
+        g_contextMenuFilter = new SourceContextMenuFilter(mainWin);
+        qApp->installEventFilter(g_contextMenuFilter);
+    }
 
     auto *toolsAction = static_cast<QAction *>(
         obs_frontend_add_tools_menu_qaction(obs_module_text("NetworkDevice.ToolsMenu")));
     if (toolsAction) {
         QObject::connect(toolsAction, &QAction::triggered, toolsAction, []() {
             openExplorerAndCreateSource();
+        });
+    }
+
+    auto *ptzToolsAction = static_cast<QAction *>(
+        obs_frontend_add_tools_menu_qaction(obs_module_text("NetworkDevice.ToolsMenuPtz")));
+    if (ptzToolsAction) {
+        QObject::connect(ptzToolsAction, &QAction::triggered, ptzToolsAction, []() {
+            showNetworkDevicePtzDock();
         });
     }
 
@@ -198,9 +418,11 @@ bool obs_module_load(void)
 
 void obs_module_unload(void)
 {
+    cleanupContextMenuFilter();
     if (!g_frontendExited) {
         obs_frontend_remove_event_callback(onFrontendEvent, nullptr);
         obs_frontend_remove_dock(kPtzDockId);
     }
+    g_ptzDock.clear();
     obs_log(LOG_INFO, "plugin unloaded");
 }

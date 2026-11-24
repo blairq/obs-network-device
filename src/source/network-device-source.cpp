@@ -38,6 +38,7 @@ struct AudioPacket {
 };
 
 constexpr const char *kPropExplorer = "open_explorer";
+constexpr const char *kPropOpenPtz = "open_ptz_dock";
 constexpr const char *kPropReconnect = "reconnect_stream";
 constexpr const char *kPropInfoBanner = "info_banner";
 constexpr const char *kPropDeviceName = "device_name";
@@ -476,6 +477,16 @@ bool onOpenExplorerClicked(obs_properties_t *props, obs_property_t *property, vo
     return false;
 }
 
+bool onOpenPtzDockClicked(obs_properties_t *props, obs_property_t *property, void *data)
+{
+    UNUSED_PARAMETER(props);
+    UNUSED_PARAMETER(property);
+
+    auto *self = static_cast<NetworkDeviceSource *>(data);
+    showNetworkDevicePtzDock(self ? self->sourceUuid : QString());
+    return false;
+}
+
 bool onReconnectClicked(obs_properties_t *props, obs_property_t *property, void *data)
 {
     UNUSED_PARAMETER(props);
@@ -505,6 +516,9 @@ obs_properties_t *networkDeviceProperties(void *data)
     obs_properties_add_button(props, kPropExplorer,
                               obs_module_text("NetworkDevice.ExplorerButton"),
                               onOpenExplorerClicked);
+    obs_properties_add_button(props, kPropOpenPtz,
+                              obs_module_text("NetworkDevice.OpenPtzButton"),
+                              onOpenPtzDockClicked);
 
     obs_properties_add_text(props, kPropInfoBanner,
                             "Usa 'Explorar dispositivos de red...' para escanear tu red, "

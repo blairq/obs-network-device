@@ -590,6 +590,31 @@ void PtzDockWidget::syncPanoramaViews()
     }
 }
 
+void PtzDockWidget::selectCameraBySourceUuid(const QString &sourceUuid)
+{
+    if (sourceUuid.isEmpty() || m_scanner.isRunning()) {
+        return;
+    }
+
+    auto findIndex = [this, &sourceUuid]() -> int {
+        for (int i = 0; i < m_cameraCombo->count(); ++i) {
+            if (m_cameraCombo->itemData(i).toString() == sourceUuid) {
+                return i;
+            }
+        }
+        return -1;
+    };
+
+    int idx = findIndex();
+    if (idx < 0) {
+        reloadCameras();
+        idx = findIndex();
+    }
+    if (idx >= 0 && m_cameraCombo->currentIndex() != idx) {
+        m_cameraCombo->setCurrentIndex(idx);
+    }
+}
+
 void PtzDockWidget::onActiveSourceChanged(const QString &sourceKey)
 {
     if (!m_followSceneCheck->isChecked() || sourceKey.isEmpty() || m_scanner.isRunning()) {

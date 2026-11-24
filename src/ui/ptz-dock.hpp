@@ -36,6 +36,8 @@ public:
     explicit PtzDockWidget(const QString &storageBaseDir, QWidget *parent = nullptr);
     ~PtzDockWidget() override;
 
+    void selectCameraBySourceUuid(const QString &sourceUuid);
+
 private slots:
     void reloadCameras();
     void onCameraSelectionChanged();

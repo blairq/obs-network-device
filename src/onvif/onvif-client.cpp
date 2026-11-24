@@ -5,10 +5,13 @@
 #include <QDateTime>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QSharedPointer>
 #include <QTimeZone>
 #include <QUrl>
 #include <QXmlStreamReader>
+
+#include <algorithm>
 
 namespace netdev {
 
@@ -558,15 +561,19 @@ void OnvifClient::inspectDevice(const QString &serviceUrl, const QString &userna
         });
 }
 
-void OnvifClient::fetchSnapshot(const QString &snapshotUri, const QString &username, const QString &password)
+void OnvifClient::fetchSnapshotToCallback(const QString &snapshotUri,
+                                          const QString &username,
+                                          const QString &password,
+                                          SnapshotCallback cb)
 {
     const QUrl url(snapshotUri);
     if (!url.isValid() || url.isEmpty()) {
-        emit snapshotError(QStringLiteral("La camara no reporto URL de captura."));
+        if (cb) {
+            cb(false, QImage(), QStringLiteral("La camara no reporto URL de captura."));
+        }
         return;
     }
 
-    const quint64 gen = ++m_snapshotGen;
     QNetworkRequest req(url);
     req.setTransferTimeout(kRequestTimeoutMs);
 
@@ -575,31 +582,49 @@ void OnvifClient::fetchSnapshot(const QString &snapshotUri, const QString &usern
     reply->setProperty("_onvifPass", password);
     reply->setProperty("_onvifAuthTries", 0);
 
-    connect(reply, &QNetworkReply::finished, this, [this, gen, reply]() {
+    connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray bytes = reply->isOpen() ? reply->readAll() : QByteArray();
         const QString err = reply->error() != QNetworkReply::NoError ? reply->errorString() : QString();
         reply->deleteLater();
 
-        if (gen != m_snapshotGen) {
+        if (!cb) {
             return;
         }
         if (status == 401 || status == 403) {
-            emit snapshotError(QStringLiteral("Captura denegada: verifica usuario/contraseña."));
+            cb(false, QImage(), QStringLiteral("Captura denegada: verifica usuario/contraseña."));
             return;
         }
         if (!err.isEmpty() || bytes.isEmpty()) {
-            emit snapshotError(err.isEmpty() ? QStringLiteral("Respuesta vacia al pedir captura.") : err);
+            cb(false, QImage(),
+               err.isEmpty() ? QStringLiteral("Respuesta vacia al pedir captura.") : err);
             return;
         }
 
         QImage img;
         if (!img.loadFromData(bytes)) {
-            emit snapshotError(QStringLiteral("El dispositivo no devolvio una imagen valida."));
+            cb(false, QImage(), QStringLiteral("El dispositivo no devolvio una imagen valida."));
             return;
         }
-        emit snapshotReady(img);
+        cb(true, img, QString());
     });
+}
+
+void OnvifClient::fetchSnapshot(const QString &snapshotUri, const QString &username, const QString &password)
+{
+    const quint64 gen = ++m_snapshotGen;
+    fetchSnapshotToCallback(
+        snapshotUri, username, password,
+        [this, gen](bool ok, const QImage &image, const QString &error) {
+            if (gen != m_snapshotGen) {
+                return;
+            }
+            if (ok) {
+                emit snapshotReady(image);
+            } else {
+                emit snapshotError(error);
+            }
+        });
 }
 
 void OnvifClient::continuousMove(const QString &ptzUrl,
@@ -797,6 +822,141 @@ void OnvifClient::removePreset(const QString &ptzUrl,
                 const bool ok = status >= 200 && status < 300 && err.isEmpty();
                 cb(ok, ok ? QString() : extractFaultMessage(resp, status, err));
             }
+        });
+}
+
+void OnvifClient::absoluteMove(const QString &ptzUrl,
+                               const QString &profileToken,
+                               const QString &username,
+                               const QString &password,
+                               qint64 clockOffsetSecs,
+                               double pan,
+                               double tilt,
+                               double zoom,
+                               bool includeZoom,
+                               double speed,
+                               StatusCallback cb)
+{
+    const auto buildBody = [=](bool withSpeed) {
+        QString posXml = QStringLiteral("<tt:PanTilt x=\"%1\" y=\"%2\"/>")
+                             .arg(pan, 0, 'f', 4)
+                             .arg(tilt, 0, 'f', 4);
+        if (includeZoom) {
+            posXml += QStringLiteral("<tt:Zoom x=\"%1\"/>").arg(zoom, 0, 'f', 4);
+        }
+
+        QString speedXml;
+        if (withSpeed && speed > 0.0) {
+            const double clampedSpd = std::clamp(speed, 0.05, 1.0);
+            speedXml = QStringLiteral(
+                           "<tptz:Speed>"
+                           "<tt:PanTilt x=\"%1\" y=\"%2\"/>%3"
+                           "</tptz:Speed>")
+                           .arg(clampedSpd, 0, 'f', 2)
+                           .arg(clampedSpd, 0, 'f', 2)
+                           .arg(includeZoom
+                                    ? QStringLiteral("<tt:Zoom x=\"%1\"/>").arg(clampedSpd, 0, 'f', 2)
+                                    : QString());
+        }
+
+        return QStringLiteral(
+                   "<tptz:AbsoluteMove>"
+                   "<tptz:ProfileToken>%1</tptz:ProfileToken>"
+                   "<tptz:Position>%2</tptz:Position>"
+                   "%3"
+                   "</tptz:AbsoluteMove>")
+            .arg(OnvifAuth::escapeXml(profileToken), posXml, speedXml);
+    };
+
+    const QString action = QStringLiteral("http://www.onvif.org/ver20/ptz/wsdl/AbsoluteMove");
+    const bool useSpeed = speed > 0.0;
+    QPointer<OnvifClient> self(this);
+
+    sendSoapRequest(
+        ptzUrl, action, buildBody(useSpeed), username, password, clockOffsetSecs,
+        [self, ptzUrl, action, username, password, clockOffsetSecs, useSpeed,
+         noSpeedBody = buildBody(false), cb](int status, const QByteArray &resp, const QString &err) {
+            const bool ok = status >= 200 && status < 300 && err.isEmpty();
+            if (ok) {
+                if (cb) {
+                    cb(true, QString());
+                }
+                return;
+            }
+            if (useSpeed && self && status > 0 && !isAuthFault(resp, status)) {
+                self->sendSoapRequest(
+                    ptzUrl, action, noSpeedBody, username, password, clockOffsetSecs,
+                    [cb](int st2, const QByteArray &resp2, const QString &err2) {
+                        if (cb) {
+                            const bool ok2 = st2 >= 200 && st2 < 300 && err2.isEmpty();
+                            cb(ok2, ok2 ? QString() : extractFaultMessage(resp2, st2, err2));
+                        }
+                    });
+                return;
+            }
+            if (cb) {
+                cb(false, extractFaultMessage(resp, status, err));
+            }
+        });
+}
+
+void OnvifClient::getPtzStatus(const QString &ptzUrl,
+                               const QString &profileToken,
+                               const QString &username,
+                               const QString &password,
+                               qint64 clockOffsetSecs,
+                               PtzStatusCallback cb)
+{
+    const QString body = QStringLiteral(
+                             "<tptz:GetStatus>"
+                             "<tptz:ProfileToken>%1</tptz:ProfileToken>"
+                             "</tptz:GetStatus>")
+                             .arg(OnvifAuth::escapeXml(profileToken));
+
+    sendSoapRequest(
+        ptzUrl,
+        QStringLiteral("http://www.onvif.org/ver20/ptz/wsdl/GetStatus"),
+        body, username, password, clockOffsetSecs,
+        [cb](int status, const QByteArray &resp, const QString &err) {
+            if (!cb) {
+                return;
+            }
+            const bool ok = status >= 200 && status < 300 && err.isEmpty();
+            if (!ok) {
+                cb(false, PtzStatus{}, extractFaultMessage(resp, status, err));
+                return;
+            }
+            const PtzStatus st = parsePtzStatus(resp);
+            if (!st.valid) {
+                cb(false, st, QStringLiteral("La camara no devolvio estado PTZ valido."));
+                return;
+            }
+            cb(true, st, QString());
+        });
+}
+
+void OnvifClient::getPtzLimits(const QString &ptzUrl,
+                               const QString &username,
+                               const QString &password,
+                               qint64 clockOffsetSecs,
+                               PtzLimitsCallback cb)
+{
+    sendSoapRequest(
+        ptzUrl,
+        QStringLiteral("http://www.onvif.org/ver20/ptz/wsdl/GetConfigurations"),
+        QStringLiteral("<tptz:GetConfigurations/>"),
+        username, password, clockOffsetSecs,
+        [cb](int status, const QByteArray &resp, const QString &err) {
+            if (!cb) {
+                return;
+            }
+            const bool ok = status >= 200 && status < 300 && err.isEmpty();
+            if (!ok) {
+                cb(false, PtzLimits{}, extractFaultMessage(resp, status, err));
+                return;
+            }
+            const PtzLimits lim = parsePtzLimits(resp);
+            cb(lim.hasLimits, lim, lim.hasLimits ? QString() : QStringLiteral("Sin rangos PTZ reportados."));
         });
 }
 
@@ -1123,6 +1283,147 @@ QVector<PtzPreset> OnvifClient::parsePresets(const QByteArray &xml)
         }
     }
     return presets;
+}
+
+PtzStatus OnvifClient::parsePtzStatus(const QByteArray &xml)
+{
+    PtzStatus st;
+    QXmlStreamReader reader(xml);
+    bool inPosition = false;
+    bool inMoveStatus = false;
+
+    while (!reader.atEnd()) {
+        const auto tok = reader.readNext();
+        if (tok == QXmlStreamReader::StartElement) {
+            const auto name = reader.name();
+            if (name == QLatin1String("Position")) {
+                inPosition = true;
+            } else if (name == QLatin1String("MoveStatus")) {
+                inMoveStatus = true;
+            } else if (inPosition) {
+                if (name == QLatin1String("PanTilt")) {
+                    bool okX = false;
+                    bool okY = false;
+                    const double x = reader.attributes().value(QLatin1String("x")).toDouble(&okX);
+                    const double y = reader.attributes().value(QLatin1String("y")).toDouble(&okY);
+                    if (okX && okY) {
+                        st.position.pan = x;
+                        st.position.tilt = y;
+                        st.position.hasPanTilt = true;
+                        st.valid = true;
+                    }
+                } else if (name == QLatin1String("Zoom")) {
+                    bool okZ = false;
+                    const double z = reader.attributes().value(QLatin1String("x")).toDouble(&okZ);
+                    if (okZ) {
+                        st.position.zoom = z;
+                        st.position.hasZoom = true;
+                        st.valid = true;
+                    }
+                }
+            } else if (inMoveStatus) {
+                if (name == QLatin1String("PanTilt")) {
+                    const QString val = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
+                    st.panTiltMoving = (val.compare(QStringLiteral("MOVING"), Qt::CaseInsensitive) == 0);
+                    st.valid = true;
+                } else if (name == QLatin1String("Zoom")) {
+                    const QString val = reader.readElementText(QXmlStreamReader::SkipChildElements).trimmed();
+                    st.zoomMoving = (val.compare(QStringLiteral("MOVING"), Qt::CaseInsensitive) == 0);
+                    st.valid = true;
+                }
+            }
+        } else if (tok == QXmlStreamReader::EndElement) {
+            const auto name = reader.name();
+            if (name == QLatin1String("Position")) {
+                inPosition = false;
+            } else if (name == QLatin1String("MoveStatus")) {
+                inMoveStatus = false;
+            }
+        }
+    }
+    return st;
+}
+
+PtzLimits OnvifClient::parsePtzLimits(const QByteArray &xml)
+{
+    PtzLimits limits;
+    QXmlStreamReader reader(xml);
+    bool inPanTiltLimits = false;
+    bool inZoomLimits = false;
+    bool inXRange = false;
+    bool inYRange = false;
+
+    double panMin = 0.0, panMax = 0.0;
+    double tiltMin = 0.0, tiltMax = 0.0;
+    double zoomMin = 0.0, zoomMax = 0.0;
+    bool gotPanMin = false, gotPanMax = false;
+    bool gotTiltMin = false, gotTiltMax = false;
+    bool gotZoomMin = false, gotZoomMax = false;
+    bool panTiltDone = false;
+    bool zoomDone = false;
+
+    while (!reader.atEnd()) {
+        const auto tok = reader.readNext();
+        if (tok == QXmlStreamReader::StartElement) {
+            const auto name = reader.name();
+            if (name == QLatin1String("PanTiltLimits") && !panTiltDone) {
+                inPanTiltLimits = true;
+                gotPanMin = gotPanMax = gotTiltMin = gotTiltMax = false;
+            } else if (name == QLatin1String("ZoomLimits") && !zoomDone) {
+                inZoomLimits = true;
+                gotZoomMin = gotZoomMax = false;
+            } else if (inPanTiltLimits || inZoomLimits) {
+                if (name == QLatin1String("XRange")) {
+                    inXRange = true;
+                } else if (name == QLatin1String("YRange")) {
+                    inYRange = true;
+                } else if (name == QLatin1String("Min") || name == QLatin1String("Max")) {
+                    bool ok = false;
+                    const double v = reader.readElementText(QXmlStreamReader::SkipChildElements).toDouble(&ok);
+                    if (ok) {
+                        const bool isMin = (name == QLatin1String("Min"));
+                        if (inPanTiltLimits && inXRange) {
+                            if (isMin) { panMin = v; gotPanMin = true; }
+                            else { panMax = v; gotPanMax = true; }
+                        } else if (inPanTiltLimits && inYRange) {
+                            if (isMin) { tiltMin = v; gotTiltMin = true; }
+                            else { tiltMax = v; gotTiltMax = true; }
+                        } else if (inZoomLimits && inXRange) {
+                            if (isMin) { zoomMin = v; gotZoomMin = true; }
+                            else { zoomMax = v; gotZoomMax = true; }
+                        }
+                    }
+                }
+            }
+        } else if (tok == QXmlStreamReader::EndElement) {
+            const auto name = reader.name();
+            if (name == QLatin1String("XRange")) {
+                inXRange = false;
+            } else if (name == QLatin1String("YRange")) {
+                inYRange = false;
+            } else if (name == QLatin1String("PanTiltLimits") && inPanTiltLimits) {
+                inPanTiltLimits = false;
+                if (gotPanMin && gotPanMax && panMin < panMax &&
+                    gotTiltMin && gotTiltMax && tiltMin < tiltMax) {
+                    limits.panMin = panMin;
+                    limits.panMax = panMax;
+                    limits.tiltMin = tiltMin;
+                    limits.tiltMax = tiltMax;
+                    limits.hasLimits = true;
+                    panTiltDone = true;
+                }
+            } else if (name == QLatin1String("ZoomLimits") && inZoomLimits) {
+                inZoomLimits = false;
+                if (gotZoomMin && gotZoomMax && zoomMin < zoomMax) {
+                    limits.zoomMin = zoomMin;
+                    limits.zoomMax = zoomMax;
+                    zoomDone = true;
+                }
+            }
+        }
+    }
+
+    return limits;
 }
 
 bool OnvifClient::isAuthFault(const QByteArray &xml, int httpStatus)

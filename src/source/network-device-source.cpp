@@ -41,6 +41,9 @@ constexpr const char *kPropExplorer = "open_explorer";
 constexpr const char *kPropReconnect = "reconnect_stream";
 constexpr const char *kPropInfoBanner = "info_banner";
 constexpr const char *kPropDeviceName = "device_name";
+constexpr const char *kPropManufacturer = "device_manufacturer";
+constexpr const char *kPropModel = "device_model";
+constexpr const char *kPropSerialNumber = "device_serial";
 constexpr const char *kPropDeviceServiceUrl = "device_service_url";
 constexpr const char *kPropMediaServiceUrl = "media_service_url";
 constexpr const char *kPropPtzServiceUrl = "ptz_service_url";
@@ -350,11 +353,21 @@ void syncPtzRegistry(NetworkDeviceSource *self)
         const char *obsName = obs_source_get_name(self->source);
         entry.sourceName = obsName ? QString::fromUtf8(obsName) : self->config.deviceName;
         entry.deviceName = self->config.deviceName.isEmpty() ? entry.sourceName : self->config.deviceName;
+        entry.manufacturer = self->config.manufacturer;
+        entry.model = self->config.model;
+        entry.serialNumber = self->config.serialNumber;
+        entry.deviceServiceUrl = self->config.deviceServiceUrl;
         entry.ptzServiceUrl = self->config.ptzServiceUrl;
+        entry.snapshotUri = self->config.snapshotUri;
         entry.profileToken = self->config.profileToken;
         entry.username = self->config.username;
         entry.password = self->config.password;
         entry.clockOffsetSecs = self->config.clockOffsetSecs;
+        entry.fallbackHostKey = netdev::computeCameraFallbackHostKey(
+            entry.deviceServiceUrl, entry.ptzServiceUrl, entry.deviceName);
+        entry.cameraKey = netdev::computeCameraStorageKey(
+            entry.manufacturer, entry.model, entry.serialNumber,
+            entry.deviceServiceUrl, entry.ptzServiceUrl, entry.deviceName);
         netdev::DeviceRegistry::instance().registerCamera(entry);
     } else {
         netdev::DeviceRegistry::instance().unregisterCamera(self->sourceUuid);
@@ -607,6 +620,9 @@ void applySourceConfigToData(obs_data_t *settings, const netdev::SourceConfig &c
         return;
     }
     obs_data_set_string(settings, kPropDeviceName, cfg.deviceName.toUtf8().constData());
+    obs_data_set_string(settings, kPropManufacturer, cfg.manufacturer.toUtf8().constData());
+    obs_data_set_string(settings, kPropModel, cfg.model.toUtf8().constData());
+    obs_data_set_string(settings, kPropSerialNumber, cfg.serialNumber.toUtf8().constData());
     obs_data_set_string(settings, kPropDeviceServiceUrl, cfg.deviceServiceUrl.toUtf8().constData());
     obs_data_set_string(settings, kPropMediaServiceUrl, cfg.mediaServiceUrl.toUtf8().constData());
     obs_data_set_string(settings, kPropPtzServiceUrl, cfg.ptzServiceUrl.toUtf8().constData());
@@ -631,6 +647,9 @@ netdev::SourceConfig readSourceConfigFromData(obs_data_t *settings)
     }
     cfg.protocol = netdev::DeviceProtocol::Onvif;
     cfg.deviceName = QString::fromUtf8(obs_data_get_string(settings, kPropDeviceName));
+    cfg.manufacturer = QString::fromUtf8(obs_data_get_string(settings, kPropManufacturer));
+    cfg.model = QString::fromUtf8(obs_data_get_string(settings, kPropModel));
+    cfg.serialNumber = QString::fromUtf8(obs_data_get_string(settings, kPropSerialNumber));
     cfg.deviceServiceUrl = QString::fromUtf8(obs_data_get_string(settings, kPropDeviceServiceUrl));
     cfg.mediaServiceUrl = QString::fromUtf8(obs_data_get_string(settings, kPropMediaServiceUrl));
     cfg.ptzServiceUrl = QString::fromUtf8(obs_data_get_string(settings, kPropPtzServiceUrl));

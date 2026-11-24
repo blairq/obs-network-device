@@ -18,6 +18,9 @@ class OnvifClient : public QObject {
 public:
     using StatusCallback = std::function<void(bool ok, const QString &error)>;
     using PresetsCallback = std::function<void(bool ok, const QVector<PtzPreset> &presets, const QString &error)>;
+    using PtzStatusCallback = std::function<void(bool ok, const PtzStatus &status, const QString &error)>;
+    using PtzLimitsCallback = std::function<void(bool ok, const PtzLimits &limits, const QString &error)>;
+    using SnapshotCallback = std::function<void(bool ok, const QImage &image, const QString &error)>;
 
     explicit OnvifClient(QObject *parent = nullptr);
     ~OnvifClient() override;
@@ -26,6 +29,10 @@ public:
 
     void inspectDevice(const QString &serviceUrl, const QString &username, const QString &password);
     void fetchSnapshot(const QString &snapshotUri, const QString &username, const QString &password);
+    void fetchSnapshotToCallback(const QString &snapshotUri,
+                                 const QString &username,
+                                 const QString &password,
+                                 SnapshotCallback cb);
 
     void continuousMove(const QString &ptzUrl,
                         const QString &profileToken,
@@ -36,6 +43,31 @@ public:
                         double tilt,
                         double zoom,
                         StatusCallback cb = nullptr);
+
+    void absoluteMove(const QString &ptzUrl,
+                      const QString &profileToken,
+                      const QString &username,
+                      const QString &password,
+                      qint64 clockOffsetSecs,
+                      double pan,
+                      double tilt,
+                      double zoom,
+                      bool includeZoom,
+                      double speed,
+                      StatusCallback cb = nullptr);
+
+    void getPtzStatus(const QString &ptzUrl,
+                      const QString &profileToken,
+                      const QString &username,
+                      const QString &password,
+                      qint64 clockOffsetSecs,
+                      PtzStatusCallback cb);
+
+    void getPtzLimits(const QString &ptzUrl,
+                      const QString &username,
+                      const QString &password,
+                      qint64 clockOffsetSecs,
+                      PtzLimitsCallback cb);
 
     void stopPtz(const QString &ptzUrl,
                  const QString &profileToken,
@@ -97,6 +129,8 @@ public:
     static QString parseStreamUri(const QByteArray &xml);
     static QString parseSnapshotUri(const QByteArray &xml);
     static QVector<PtzPreset> parsePresets(const QByteArray &xml);
+    static PtzStatus parsePtzStatus(const QByteArray &xml);
+    static PtzLimits parsePtzLimits(const QByteArray &xml);
     static bool isAuthFault(const QByteArray &xml, int httpStatus);
     static bool isSoapVersionMismatch(const QByteArray &xml, int httpStatus);
 

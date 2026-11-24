@@ -27,11 +27,18 @@ void DeviceRegistry::registerCamera(const PtzCameraEntry &entry)
                 found = true;
                 if (existing.sourceName != entry.sourceName ||
                     existing.deviceName != entry.deviceName ||
+                    existing.manufacturer != entry.manufacturer ||
+                    existing.model != entry.model ||
+                    existing.serialNumber != entry.serialNumber ||
+                    existing.deviceServiceUrl != entry.deviceServiceUrl ||
                     existing.ptzServiceUrl != entry.ptzServiceUrl ||
+                    existing.snapshotUri != entry.snapshotUri ||
                     existing.profileToken != entry.profileToken ||
                     existing.username != entry.username ||
                     existing.password != entry.password ||
-                    existing.clockOffsetSecs != entry.clockOffsetSecs) {
+                    existing.clockOffsetSecs != entry.clockOffsetSecs ||
+                    existing.cameraKey != entry.cameraKey ||
+                    existing.fallbackHostKey != entry.fallbackHostKey) {
                     existing = entry;
                     changed = true;
                 }

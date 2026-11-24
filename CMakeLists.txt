@@ -25,6 +25,10 @@ add_library(obs-network-device-core STATIC
   src/core/device-provider.hpp
   src/core/device-registry.hpp
   src/core/device-registry.cpp
+  src/core/panorama-builder.hpp
+  src/core/panorama-builder.cpp
+  src/core/panorama-store.hpp
+  src/core/panorama-store.cpp
   src/onvif/onvif-auth.hpp
   src/onvif/onvif-auth.cpp
   src/onvif/ws-discovery.hpp
@@ -59,12 +63,24 @@ endif()
 # OBS Studio Plugin Module
 add_library(${CMAKE_PROJECT_NAME} MODULE
   src/plugin-main.cpp
+  src/core/obs-frame-capture.hpp
+  src/core/obs-frame-capture.cpp
+  src/core/panorama-scanner.hpp
+  src/core/panorama-scanner.cpp
+  src/input/joystick-controller.hpp
+  src/input/joystick-controller.cpp
   src/source/network-device-source.hpp
   src/source/network-device-source.cpp
   src/ui/device-explorer-dialog.hpp
   src/ui/device-explorer-dialog.cpp
+  src/ui/panorama-scan-dialog.hpp
+  src/ui/panorama-scan-dialog.cpp
+  src/ui/panorama-view-widget.hpp
+  src/ui/panorama-view-widget.cpp
   src/ui/ptz-dock.hpp
   src/ui/ptz-dock.cpp
+  src/ui/virtual-joystick-widget.hpp
+  src/ui/virtual-joystick-widget.cpp
 )
 
 set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
@@ -80,6 +96,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME} PRIVATE
   OBS::libobs
   $<$<BOOL:${ENABLE_FRONTEND_API}>:OBS::obs-frontend-api>
   Qt6::Widgets
+  $<$<BOOL:${OS_WINDOWS}>:winmm>
 )
 
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
@@ -121,8 +138,13 @@ if(BUILD_TESTS)
       get_filename_component(_qt6_bin_dir "${Qt6_DIR}/../../../bin" ABSOLUTE)
     endif()
     if(_qt6_bin_dir AND EXISTS "${_qt6_bin_dir}")
+      set(_qt6_env "PATH=path_list_prepend:${_qt6_bin_dir}")
+      get_filename_component(_qt6_plugins_dir "${_qt6_bin_dir}/../plugins" ABSOLUTE)
+      if(EXISTS "${_qt6_plugins_dir}")
+        list(APPEND _qt6_env "QT_PLUGIN_PATH=path_list_prepend:${_qt6_plugins_dir}")
+      endif()
       set_tests_properties(OnvifCoreTests PROPERTIES
-        ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${_qt6_bin_dir}"
+        ENVIRONMENT_MODIFICATION "${_qt6_env}"
       )
     endif()
   endif()

@@ -1,11 +1,18 @@
+#include "core/panorama-builder.hpp"
+#include "core/panorama-store.hpp"
 #include "onvif/onvif-auth.hpp"
 #include "onvif/onvif-client.hpp"
 #include "onvif/ws-discovery.hpp"
 
+#include <QColor>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QImage>
+#include <QPainter>
+#include <QTemporaryDir>
 #include <QTimeZone>
 
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 
@@ -323,6 +330,202 @@ void testProfilesUrisPresetsAndFaults()
     CHECK(!OnvifClient::isAuthFault(nonAuthFault, 500));
 }
 
+void testPtzStatusLimitsAndKeys()
+{
+    const QByteArray statusXml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <s:Body>
+    <tptz:GetStatusResponse>
+      <tptz:PTZStatus>
+        <tt:Position>
+          <tt:PanTilt x="0.325" y="-0.15" space="http://www.onvif.org/ver10/tptz/PanTiltSpaces/PositionGenericSpace"/>
+          <tt:Zoom x="0.4" space="http://www.onvif.org/ver10/tptz/ZoomSpaces/PositionGenericSpace"/>
+        </tt:Position>
+        <tt:MoveStatus>
+          <tt:PanTilt>MOVING</tt:PanTilt>
+          <tt:Zoom>IDLE</tt:Zoom>
+        </tt:MoveStatus>
+      </tptz:PTZStatus>
+    </tptz:GetStatusResponse>
+  </s:Body>
+</s:Envelope>)";
+
+    const PtzStatus st = OnvifClient::parsePtzStatus(statusXml);
+    CHECK(st.valid);
+    CHECK(st.position.hasPanTilt);
+    CHECK(st.position.hasZoom);
+    CHECK(std::abs(st.position.pan - 0.325) < 1e-6);
+    CHECK(std::abs(st.position.tilt - (-0.15)) < 1e-6);
+    CHECK(std::abs(st.position.zoom - 0.4) < 1e-6);
+    CHECK(st.panTiltMoving == true);
+    CHECK(st.zoomMoving == false);
+
+    const QByteArray limitsXml = R"(<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl" xmlns:tt="http://www.onvif.org/ver10/schema">
+  <s:Body>
+    <tptz:GetConfigurationsResponse>
+      <tptz:PTZConfiguration token="PTZCfg_1">
+        <tt:PanTiltLimits>
+          <tt:Range>
+            <tt:XRange><tt:Min>-0.9</tt:Min><tt:Max>0.9</tt:Max></tt:XRange>
+            <tt:YRange><tt:Min>-0.6</tt:Min><tt:Max>0.75</tt:Max></tt:YRange>
+          </tt:Range>
+        </tt:PanTiltLimits>
+        <tt:ZoomLimits>
+          <tt:Range>
+            <tt:XRange><tt:Min>0.0</tt:Min><tt:Max>1.0</tt:Max></tt:XRange>
+          </tt:Range>
+        </tt:ZoomLimits>
+      </tptz:PTZConfiguration>
+    </tptz:GetConfigurationsResponse>
+  </s:Body>
+</s:Envelope>)";
+
+    const PtzLimits lim = OnvifClient::parsePtzLimits(limitsXml);
+    CHECK(lim.hasLimits);
+    CHECK(std::abs(lim.panMin - (-0.9)) < 1e-6);
+    CHECK(std::abs(lim.panMax - 0.9) < 1e-6);
+    CHECK(std::abs(lim.tiltMin - (-0.6)) < 1e-6);
+    CHECK(std::abs(lim.tiltMax - 0.75) < 1e-6);
+    CHECK(std::abs(lim.zoomMin - 0.0) < 1e-6);
+    CHECK(std::abs(lim.zoomMax - 1.0) < 1e-6);
+
+    const QString k1 = computeCameraStorageKey(
+        QStringLiteral("Polycom"), QStringLiteral("MPTZ-9"), QStringLiteral("SN:AB-123"),
+        QStringLiteral("http://192.168.1.96/onvif/device_service"),
+        QStringLiteral("http://192.168.1.96/onvif/ptz_service"),
+        QStringLiteral("Polycom MPTZ-9"));
+    CHECK(k1 == QStringLiteral("serial_polycom_mptz-9_sn_ab-123"));
+
+    const QString kFb = computeCameraStorageKey(
+        QStringLiteral("Polycom"), QStringLiteral("MPTZ-9"), QString(),
+        QStringLiteral("http://192.168.1.96/onvif/device_service"),
+        QStringLiteral("http://192.168.1.96/onvif/ptz_service"),
+        QStringLiteral("Polycom MPTZ-9"));
+    CHECK(kFb == QStringLiteral("host_192_168_1_96_80_polycom_mptz-9"));
+}
+
+void testPanoramaBuilderMapperAndStore()
+{
+    // Build synthetic textured 960x540 master scene and crop a 3x2 overlapping grid
+    // Master size = 960x540, tile size = 480x270, stepX = 240 (50% overlap), stepY = 180 (33% overlap)
+    // Wait: 480 + 2*240 = 960; 270 + 180 = 450
+    QImage master(960, 450, QImage::Format_RGB32);
+    master.fill(QColor(25, 35, 50));
+    {
+        QPainter painter(&master);
+        for (int gx = 0; gx < 960; gx += 48) {
+            for (int gy = 0; gy < 450; gy += 45) {
+                const int r = (gx * 211 + gy * 37) % 200 + 30;
+                const int g = (gx * 53 + gy * 149) % 200 + 30;
+                const int b = (gx * 97 + gy * 73) % 200 + 30;
+                painter.fillRect(gx + 2, gy + 2, 42, 39, QColor(r, g, b));
+                painter.setPen(Qt::white);
+                painter.drawLine(gx, gy, gx + 47, gy + 44);
+            }
+        }
+    }
+
+    PanoramaScanSettings scanSettings;
+    scanSettings.cols = 3;
+    scanSettings.rows = 2;
+    scanSettings.panMin = -0.8;
+    scanSettings.panMax = 0.8;
+    scanSettings.tiltMin = -0.3;
+    scanSettings.tiltMax = 0.5;
+
+    QVector<CapturedTile> tiles;
+    for (int r = 0; r < 2; ++r) {
+        const double tilt = (r == 0) ? 0.5 : -0.3;
+        for (int c = 0; c < 3; ++c) {
+            const double pan = -0.8 + static_cast<double>(c) * 0.8;
+            CapturedTile ct;
+            ct.col = c;
+            ct.row = r;
+            ct.pan = pan;
+            ct.tilt = tilt;
+            ct.image = master.copy(c * 240, r * 180, 480, 270);
+            tiles.push_back(ct);
+        }
+    }
+
+    const PanoramaBuildResult built = PanoramaBuilder::build(tiles, scanSettings);
+    CHECK(built.ok);
+    CHECK(!built.image.isNull());
+    // Must detect significant overlap -> stitched width strictly less than un-overlapped 3 * 480 = 1440
+    CHECK(built.image.width() >= 920 && built.image.width() <= 1010);
+    CHECK(built.image.height() >= 415 && built.image.height() <= 490);
+    CHECK(built.meta.tiles.size() == 6);
+
+    // Round-trip interior point via PanoramaMapper
+    double panOut = 0.0, tiltOut = 0.0;
+    const double testPx = 0.37 * built.meta.width;
+    const double testPy = 0.42 * built.meta.height;
+    CHECK(PanoramaMapper::pixelToPanTilt(built.meta, testPx, testPy, panOut, tiltOut));
+
+    double pxBack = 0.0, pyBack = 0.0;
+    CHECK(PanoramaMapper::panTiltToPixel(built.meta, panOut, tiltOut, pxBack, pyBack));
+    CHECK(std::abs(pxBack - testPx) < 1.5);
+    CHECK(std::abs(pyBack - testPy) < 1.5);
+
+    // Check inverted Pan + Tilt mapping direction
+    PanoramaMeta invMeta = built.meta;
+    invMeta.invertPan = true;
+    invMeta.invertTilt = true;
+    for (PanoramaTileMeta &t : invMeta.tiles) {
+        t.pan = -t.pan;
+        t.tilt = 0.2 - t.tilt;
+    }
+    invMeta.panMin = -0.8;
+    invMeta.panMax = 0.8;
+    invMeta.tiltMin = -0.3;
+    invMeta.tiltMax = 0.5;
+    double invPanLeft = 0.0, invPanRight = 0.0, tmpTilt = 0.0;
+    CHECK(PanoramaMapper::pixelToPanTilt(invMeta, invMeta.width * 0.15, invMeta.height * 0.5, invPanLeft, tmpTilt));
+    CHECK(PanoramaMapper::pixelToPanTilt(invMeta, invMeta.width * 0.85, invMeta.height * 0.5, invPanRight, tmpTilt));
+    CHECK(invPanLeft > invPanRight);
+
+    // Storage round-trip including fallbackHostKey resolution
+    QTemporaryDir tmpDir;
+    CHECK(tmpDir.isValid());
+    PanoramaStore store(tmpDir.path());
+
+    CameraPtzProfile prof;
+    prof.cameraKey = computeCameraStorageKey(
+        QString(), QString(), QString(),
+        QStringLiteral("http://192.168.1.96/onvif/device_service"),
+        QStringLiteral("http://192.168.1.96/onvif/ptz_service"),
+        QStringLiteral("Polycom MPTZ-9"));
+    prof.cameraName = QStringLiteral("Polycom MPTZ-9");
+    prof.invertPan = true;
+    CHECK(store.savePanorama(prof, built.image, built.meta));
+
+    SavedPtzPreset sp;
+    sp.id = QStringLiteral("preset_test_1");
+    sp.name = QStringLiteral("Pizarron");
+    sp.hasPosition = true;
+    sp.pan = 0.25;
+    sp.tilt = 0.10;
+    sp.zoom = 0.35;
+    sp.thumbnailFile = store.savePresetThumbnail(prof.cameraKey, sp.id, tiles.first().image);
+    CHECK(!sp.thumbnailFile.isEmpty());
+    prof.savedPresets.push_back(sp);
+    CHECK(store.saveProfile(prof));
+
+    CameraPtzProfile loaded;
+    QImage loadedPano;
+    // Query with a serial key that doesn't exist yet -> should resolve via fallbackHostKey!
+    CHECK(store.loadProfile(QStringLiteral("serial_polycom_mptz-9_sn999"),
+                            prof.cameraKey, loaded, loadedPano));
+    CHECK(loaded.cameraName == QStringLiteral("Polycom MPTZ-9"));
+    CHECK(loaded.invertPan == true);
+    CHECK(!loadedPano.isNull());
+    CHECK(loaded.panorama.isValid());
+    CHECK(loaded.savedPresets.size() == 1);
+    CHECK(loaded.savedPresets.at(0).name == QStringLiteral("Pizarron"));
+    CHECK(!store.loadPresetThumbnail(loaded.cameraKey, loaded.savedPresets.at(0).thumbnailFile).isNull());
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -335,6 +538,8 @@ int main(int argc, char *argv[])
     testSystemDateAndTimeParser();
     testDeviceInfoServicesCapabilities();
     testProfilesUrisPresetsAndFaults();
+    testPtzStatusLimitsAndKeys();
+    testPanoramaBuilderMapperAndStore();
 
     if (g_failures > 0) {
         std::fprintf(stderr, "%d test check(s) FAILED.\n", g_failures);

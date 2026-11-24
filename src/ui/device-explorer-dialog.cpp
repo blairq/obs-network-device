@@ -637,6 +637,9 @@ SourceConfig DeviceExplorerDialog::selectedConfig() const
     const MediaProfile &prof = dev.profiles.at(row);
     cfg.protocol = dev.protocol;
     cfg.deviceName = dev.name;
+    cfg.manufacturer = dev.manufacturer;
+    cfg.model = dev.model;
+    cfg.serialNumber = dev.serialNumber;
     cfg.deviceServiceUrl = dev.deviceServiceUrl;
     cfg.mediaServiceUrl = dev.mediaServiceUrl;
     cfg.ptzServiceUrl = dev.ptzServiceUrl;

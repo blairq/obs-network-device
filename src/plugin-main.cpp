@@ -19,6 +19,7 @@ the Free Software Foundation; either version 2 of the License, or
 
 #include <QAction>
 #include <QDialog>
+#include <QDir>
 #include <QObject>
 #include <QString>
 #include <QWidget>
@@ -172,7 +173,13 @@ bool obs_module_load(void)
     registerNetworkDeviceSource();
 
     auto *mainWin = static_cast<QWidget *>(obs_frontend_get_main_window());
-    auto *ptzDock = new netdev::PtzDockWidget(mainWin);
+    QString storageDir;
+    if (char *cfgPath = obs_module_config_path("cameras")) {
+        storageDir = QString::fromUtf8(cfgPath);
+        bfree(cfgPath);
+        QDir().mkpath(storageDir);
+    }
+    auto *ptzDock = new netdev::PtzDockWidget(storageDir, mainWin);
     obs_frontend_add_dock_by_id(kPtzDockId, obs_module_text("NetworkDevice.PtzDockTitle"), ptzDock);
 
     auto *toolsAction = static_cast<QAction *>(

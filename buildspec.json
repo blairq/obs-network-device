@@ -38,7 +38,7 @@
   },
   "name": "obs-network-device",
   "displayName": "OBS Network Device",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Jorge (blairq)",
   "website": "https://github.com/blairq/obs-network-device",
   "email": "noreply@github.com"
